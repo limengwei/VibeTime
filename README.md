@@ -1,6 +1,10 @@
-# Vibe Time
+<p align="center">
+  <img src="build/appicon.png" width="128" />
+</p>
 
-轻松找到你的宁静 — 一款桌面白噪音/环境音应用，帮助你专注、放松和入眠。
+<h1 align="center">Vibe Time</h1>
+
+<p align="center">轻松找到你的宁静 — 一款桌面白噪音/环境音应用，帮助你专注、放松和入眠。</p>
 
 ## 截图
 
