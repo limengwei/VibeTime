@@ -9,12 +9,10 @@
 ## 截图
 
 <p align="center">
-  <img src="screenshot/ScreenShot_01.png" width="45%" />
-  <img src="screenshot/ScreenShot_02.png" width="45%" />
-</p>
-<p align="center">
-  <img src="screenshot/ScreenShot_03.png" width="45%" />
-  <img src="screenshot/ScreenShot_04.png" width="45%" />
+  <img src="screenshot/ScreenShot_01.png" width="90%" />
+  <img src="screenshot/ScreenShot_02.png" width="90%" />
+  <img src="screenshot/ScreenShot_03.png" width="90%" />
+  <img src="screenshot/ScreenShot_04.png" width="90%" />
 </p>
 
 ## 功能特性
