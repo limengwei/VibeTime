@@ -1,6 +1,23 @@
 let audioCtx = null
 let masterGain = null
 
+const soundFiles = {
+  rain: '/audio/rain.m4a',
+  thunder: '/audio/thunder.m4a',
+  wind: '/audio/wind.m4a',
+  fire: '/audio/fire.m4a',
+  ocean: '/audio/waves.m4a',
+  birds: '/audio/birds.m4a',
+  whiteNoise: '/audio/whitenoise.m4a',
+  cafe: '/audio/cafe.m4a',
+  forest: '/audio/forest.m4a',
+  singingBowl: '/audio/singing-bowl.m4a',
+  fan: '/audio/fan.m4a',
+  piano: '/audio/piano.m4a'
+}
+
+const audioBufferCache = {}
+
 function getAudioContext() {
   if (!audioCtx) {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)()
@@ -19,7 +36,100 @@ function getMasterGain() {
   return masterGain
 }
 
-class NoiseGenerator {
+async function loadAudioBuffer(type) {
+  if (audioBufferCache[type]) {
+    return audioBufferCache[type]
+  }
+  const url = soundFiles[type]
+  if (!url) return null
+  try {
+    const response = await fetch(url)
+    if (!response.ok) return null
+    const arrayBuffer = await response.arrayBuffer()
+    const ctx = getAudioContext()
+    const audioBuffer = await ctx.decodeAudioData(arrayBuffer)
+    audioBufferCache[type] = audioBuffer
+    return audioBuffer
+  } catch (e) {
+    console.warn(`Failed to load audio file for ${type}, falling back to synthesis:`, e)
+    return null
+  }
+}
+
+class FileAudioPlayer {
+  constructor(type) {
+    this.type = type
+    this.ctx = getAudioContext()
+    this.output = this.ctx.createGain()
+    this.output.gain.value = 0
+    this.output.connect(getMasterGain())
+    this.source = null
+    this.playing = false
+    this.volume = 0.5
+    this.buffer = null
+  }
+
+  async start() {
+    if (this.playing) return
+    this.playing = true
+    if (!this.buffer) {
+      this.buffer = await loadAudioBuffer(this.type)
+    }
+    if (!this.buffer || !this.playing) {
+      return false
+    }
+    this._playBuffer()
+    return true
+  }
+
+  _playBuffer() {
+    this.source = this.ctx.createBufferSource()
+    this.source.buffer = this.buffer
+    this.source.loop = true
+    this.source.connect(this.output)
+    this._fadeIn()
+    this.source.start()
+  }
+
+  stop() {
+    this.playing = false
+    this._fadeOut(() => {
+      if (this.source) {
+        try { this.source.stop() } catch (e) { /* already stopped */ }
+        this.source = null
+      }
+    })
+  }
+
+  setVolume(v) {
+    this.volume = v
+    if (this.playing) {
+      const now = this.ctx.currentTime
+      this.output.gain.cancelScheduledValues(now)
+      this.output.gain.setValueAtTime(this.output.gain.value, now)
+      this.output.gain.linearRampToValueAtTime(v, now + 0.05)
+    }
+  }
+
+  _fadeIn() {
+    const now = this.ctx.currentTime
+    this.output.gain.cancelScheduledValues(now)
+    this.output.gain.setValueAtTime(0, now)
+    this.output.gain.linearRampToValueAtTime(this.volume, now + 0.5)
+  }
+
+  _fadeOut(callback) {
+    const now = this.ctx.currentTime
+    this.output.gain.cancelScheduledValues(now)
+    this.output.gain.setValueAtTime(this.output.gain.value, now)
+    this.output.gain.linearRampToValueAtTime(0, now + 0.3)
+    if (callback) {
+      setTimeout(callback, 350)
+    }
+  }
+}
+
+class SynthGenerator {
   constructor(type) {
     this.type = type
     this.ctx = getAudioContext()
@@ -34,7 +144,7 @@ class NoiseGenerator {
   start() {
     if (this.playing) return
     this.playing = true
-    this.stop()
+    this._cleanupSources()
     this._createSources()
     this._fadeIn()
   }
@@ -42,10 +152,7 @@ class NoiseGenerator {
   stop() {
     this.playing = false
     this._fadeOut(() => {
-      this.sources.forEach(s => {
-        try { s.stop() } catch (e) { /* already stopped */ }
-      })
-      this.sources = []
+      this._cleanupSources()
     })
   }
 
@@ -57,6 +164,13 @@ class NoiseGenerator {
       this.output.gain.setValueAtTime(this.output.gain.value, now)
       this.output.gain.linearRampToValueAtTime(v, now + 0.05)
     }
+  }
+
+  _cleanupSources() {
+    this.sources.forEach(s => {
+      try { s.stop() } catch (e) { /* already stopped */ }
+    })
+    this.sources = []
   }
 
   _fadeIn() {
@@ -94,12 +208,10 @@ class NoiseGenerator {
     const source = this.ctx.createBufferSource()
     source.buffer = buffer
     source.loop = true
-
     const filter = this.ctx.createBiquadFilter()
     filter.type = filterType
     filter.frequency.value = frequency
     filter.Q.value = Q
-
     source.connect(filter)
     filter.connect(this.output)
     source.start()
@@ -109,44 +221,19 @@ class NoiseGenerator {
 
   _createSources() {
     switch (this.type) {
-      case 'rain':
-        this._createRain()
-        break
-      case 'thunder':
-        this._createThunder()
-        break
-      case 'wind':
-        this._createWind()
-        break
-      case 'fire':
-        this._createFire()
-        break
-      case 'ocean':
-        this._createOcean()
-        break
-      case 'birds':
-        this._createBirds()
-        break
-      case 'whiteNoise':
-        this._createWhiteNoise()
-        break
-      case 'cafe':
-        this._createCafe()
-        break
-      case 'forest':
-        this._createForest()
-        break
-      case 'singingBowl':
-        this._createSingingBowl()
-        break
-      case 'fan':
-        this._createFan()
-        break
-      case 'piano':
-        this._createPiano()
-        break
-      default:
-        this._createFilteredNoise('lowpass', 1000)
+      case 'rain': this._createRain(); break
+      case 'thunder': this._createThunder(); break
+      case 'wind': this._createWind(); break
+      case 'fire': this._createFire(); break
+      case 'ocean': this._createOcean(); break
+      case 'birds': this._createBirds(); break
+      case 'whiteNoise': this._createWhiteNoise(); break
+      case 'cafe': this._createCafe(); break
+      case 'forest': this._createForest(); break
+      case 'singingBowl': this._createSingingBowl(); break
+      case 'fan': this._createFan(); break
+      case 'piano': this._createPiano(); break
+      default: this._createFilteredNoise('lowpass', 1000)
     }
   }
 
@@ -269,8 +356,7 @@ class NoiseGenerator {
       oscGain.connect(this.output)
       osc.start(now)
       osc.stop(now + 0.15)
-      const delay = 300 + Math.random() * 2000
-      setTimeout(chirp, delay)
+      setTimeout(chirp, 300 + Math.random() * 2000)
     }
     chirp()
     const chirp2 = () => {
@@ -290,8 +376,7 @@ class NoiseGenerator {
       oscGain.connect(this.output)
       osc.start(now)
       osc.stop(now + 0.22)
-      const delay = 500 + Math.random() * 3000
-      setTimeout(chirp2, delay)
+      setTimeout(chirp2, 500 + Math.random() * 3000)
     }
     setTimeout(chirp2, 500)
   }
@@ -433,7 +518,6 @@ class NoiseGenerator {
   }
 
   _createPiano() {
-    const notes = [261.6, 293.7, 329.6, 349.2, 392, 440, 493.9, 523.3]
     const pentatonic = [261.6, 293.7, 329.6, 392, 440, 523.3, 587.3, 659.3]
     const playNote = () => {
       if (!this.playing) return
@@ -467,25 +551,36 @@ class NoiseGenerator {
   }
 }
 
-const activeGenerators = {}
+const activePlayers = {}
 
-export function startSound(type) {
+export async function startSound(type) {
   getAudioContext()
-  if (!activeGenerators[type]) {
-    activeGenerators[type] = new NoiseGenerator(type)
+  if (activePlayers[type]) {
+    activePlayers[type].stop()
+    delete activePlayers[type]
   }
-  activeGenerators[type].start()
+  const filePlayer = new FileAudioPlayer(type)
+  filePlayer.volume = 0.5
+  const loaded = await filePlayer.start()
+  if (loaded) {
+    activePlayers[type] = filePlayer
+    return
+  }
+  const synth = new SynthGenerator(type)
+  synth.start()
+  activePlayers[type] = synth
 }
 
 export function stopSound(type) {
-  if (activeGenerators[type]) {
-    activeGenerators[type].stop()
+  if (activePlayers[type]) {
+    activePlayers[type].stop()
+    delete activePlayers[type]
   }
 }
 
 export function setSoundVolume(type, volume) {
-  if (activeGenerators[type]) {
-    activeGenerators[type].setVolume(volume)
+  if (activePlayers[type]) {
+    activePlayers[type].setVolume(volume)
   }
 }
 
@@ -498,8 +593,9 @@ export function setMasterVolume(volume) {
 }
 
 export function stopAll() {
-  Object.keys(activeGenerators).forEach(type => {
-    activeGenerators[type].stop()
+  Object.keys(activePlayers).forEach(type => {
+    activePlayers[type].stop()
+    delete activePlayers[type]
   })
 }
 
