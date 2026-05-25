@@ -6,3 +6,7 @@ frontend/dist
 .dolt/
 *.db
 .beads-credential-key
+/.beads
+/.claude
+CLAUDE.md
+AGENTS.md

@@ -1,68 +1,42 @@
 <script setup>
-import { ref, reactive, computed } from 'vue'
-import SoundCard from './components/SoundCard.vue'
+import { ref, reactive, computed, onMounted } from 'vue'
+import FocusMode from './components/FocusMode.vue'
+import ScenePresets from './components/ScenePresets.vue'
+import { WindowMinimise } from '../wailsjs/runtime/runtime'
+import { HideWindow, ListSounds } from '../wailsjs/go/main/App'
 import {
   startSound,
   stopSound,
   setSoundVolume,
   setMasterVolume,
   stopAll,
-  resumeAudioContext
+  resumeAudioContext,
+  registerSounds
 } from './audio/audioEngine.js'
 
-const sounds = reactive([
-  { id: 'rain', name: 'Rain', description: 'Heavy rainfall', iconKey: 'rain', playing: false, volume: 0.5 },
-  { id: 'thunder', name: 'Thunder', description: 'Distant storm', iconKey: 'thunder', playing: false, volume: 0.5 },
-  { id: 'wind', name: 'Wind', description: 'Howling wind', iconKey: 'wind', playing: false, volume: 0.5 },
-  { id: 'fire', name: 'Fireplace', description: 'Crackling fire', iconKey: 'fire', playing: false, volume: 0.5 },
-  { id: 'ocean', name: 'Ocean Waves', description: 'Calming sea waves', iconKey: 'ocean', playing: false, volume: 0.5 },
-  { id: 'birds', name: 'Birds', description: 'Morning chirping', iconKey: 'birds', playing: false, volume: 0.5 },
-  { id: 'whiteNoise', name: 'White Noise', description: 'Consistent static', iconKey: 'whiteNoise', playing: false, volume: 0.5 },
-  { id: 'cafe', name: 'Cafe', description: 'Coffee shop ambience', iconKey: 'cafe', playing: false, volume: 0.5 },
-  { id: 'forest', name: 'Forest', description: 'Birds and leaves', iconKey: 'forest', playing: false, volume: 0.5 },
-  { id: 'singingBowl', name: 'Singing Bowl', description: 'Tibetan meditation', iconKey: 'singingBowl', playing: false, volume: 0.5 },
-  { id: 'fan', name: 'Fan', description: 'Room fan noise', iconKey: 'fan', playing: false, volume: 0.5 },
-  { id: 'piano', name: 'Piano', description: 'Soft melodies', iconKey: 'piano', playing: false, volume: 0.5 }
-])
-
+const categories = ref([])
+const soundStates = reactive({})
 const masterVolume = ref(0.8)
-const activeCount = computed(() => sounds.filter(s => s.playing).length)
+const focusMode = ref(false)
+const scenePresetsRef = ref(null)
 
-const presets = [
-  { name: 'Relax', sounds: { rain: 0.6, thunder: 0.2, fire: 0.4 } },
-  { name: 'Meditation', sounds: { singingBowl: 0.5, rain: 0.2 } },
-  { name: 'Sleep', sounds: { rain: 0.5, thunder: 0.3, whiteNoise: 0.3 } },
-  { name: 'Focus', sounds: { whiteNoise: 0.4, cafe: 0.3, fan: 0.3 } },
-  { name: 'Study', sounds: { cafe: 0.5, rain: 0.3 } },
-  { name: 'Ocean', sounds: { ocean: 0.6, wind: 0.3, birds: 0.2 } },
-  { name: 'Cafe', sounds: { cafe: 0.6, rain: 0.2 } },
-  { name: 'Work', sounds: { fan: 0.4, whiteNoise: 0.3 } }
-]
+const activeCount = computed(() => {
+  return Object.values(soundStates).filter(s => s.playing).length
+})
 
-const activePreset = ref(null)
-
-async function toggleSound(id) {
-  resumeAudioContext()
-  const sound = sounds.find(s => s.id === id)
-  if (!sound) return
-  if (sound.playing) {
-    sound.playing = false
-    stopSound(id)
-  } else {
-    sound.playing = true
-    await startSound(id)
-    setSoundVolume(id, sound.volume)
+function initSoundState(sound) {
+  if (!soundStates[sound.id]) {
+    soundStates[sound.id] = { playing: false, volume: 0.5 }
   }
-  activePreset.value = null
 }
 
-function changeVolume(id, volume) {
-  const sound = sounds.find(s => s.id === id)
-  if (!sound) return
-  sound.volume = volume
-  if (sound.playing) {
-    setSoundVolume(id, volume)
-  }
+function toggleFocusMode() {
+  focusMode.value = !focusMode.value
+}
+
+function onExitFocusMode() {
+  focusMode.value = false
+  stopAllSounds()
 }
 
 function onMasterVolumeChange(e) {
@@ -70,67 +44,109 @@ function onMasterVolumeChange(e) {
   setMasterVolume(masterVolume.value)
 }
 
-async function applyPreset(preset) {
-  resumeAudioContext()
-  sounds.forEach(s => {
-    s.playing = false
-    stopSound(s.id)
-  })
-  for (const [id, vol] of Object.entries(preset.sounds)) {
-    const sound = sounds.find(s => s.id === id)
-    if (sound) {
-      sound.volume = vol
-      sound.playing = true
-      await startSound(id)
-      setSoundVolume(id, vol)
+function stopAllSounds(clearScene = true) {
+  Object.keys(soundStates).forEach(id => {
+    if (soundStates[id].playing) {
+      soundStates[id].playing = false
+      stopSound(id)
     }
-  }
-  activePreset.value = preset.name
+  })
+  if (clearScene) scenePresetsRef.value?.clearSelection()
 }
 
-function stopAllSounds() {
-  sounds.forEach(s => {
-    s.playing = false
-    stopSound(s.id)
-  })
-  activePreset.value = null
+async function applyPreset(soundsMap) {
+  resumeAudioContext()
+  stopAllSounds(false)
+  for (const [id, vol] of Object.entries(soundsMap)) {
+    if (!soundStates[id]) soundStates[id] = { playing: false, volume: 0.5 }
+    soundStates[id].playing = true
+    soundStates[id].volume = vol
+    await startSound(id)
+    setSoundVolume(id, vol)
+  }
 }
+
+async function onPreviewPlay(id, vol) {
+  resumeAudioContext()
+  if (!soundStates[id]) soundStates[id] = { playing: false, volume: 0.5 }
+  soundStates[id].playing = true
+  soundStates[id].volume = vol
+  await startSound(id)
+  setSoundVolume(id, vol)
+}
+
+function onPreviewStop(id) {
+  if (soundStates[id]) {
+    soundStates[id].playing = false
+    stopSound(id)
+  }
+}
+
+function onUpdateVolume(id, vol) {
+  if (soundStates[id]) {
+    soundStates[id].volume = vol
+  }
+  setSoundVolume(id, vol)
+}
+
+async function loadSounds() {
+  const cats = await ListSounds()
+  categories.value = cats
+  const allSnds = []
+  cats.forEach(cat => {
+    cat.sounds.forEach(s => {
+      initSoundState(s)
+      allSnds.push(s)
+    })
+  })
+  registerSounds(allSnds)
+}
+
+onMounted(() => {
+  loadSounds()
+})
 </script>
 
 <template>
   <div class="app-container">
+    <FocusMode v-if="focusMode" @exit="onExitFocusMode" />
+    <div class="titlebar">
+      <div class="titlebar-drag">
+        <span class="titlebar-title">Vibe Time</span>
+      </div>
+      <div class="titlebar-controls">
+        <button class="titlebar-btn" :class="{ 'focus-active': focusMode }" :disabled="activeCount === 0" @click="toggleFocusMode" :title="activeCount === 0 ? '请先播放音效' : focusMode ? '退出专注模式' : '专注模式'">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg>
+        </button>
+        <button class="titlebar-btn" @click="WindowMinimise" title="最小化">
+          <svg width="12" height="12" viewBox="0 0 12 12"><rect y="5" width="12" height="1.5" fill="currentColor"/></svg>
+        </button>
+        <button class="titlebar-btn titlebar-btn-close" @click="HideWindow" title="最小化到托盘">
+          <svg width="12" height="12" viewBox="0 0 12 12"><path d="M1 1L11 11M11 1L1 11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+    </div>
     <header class="app-header">
       <div class="header-top">
         <h1 class="app-title">Vibe Time</h1>
-        <p class="app-subtitle">Find Your Peace with Ease</p>
-      </div>
-      <div class="preset-bar">
-        <button
-          v-for="preset in presets"
-          :key="preset.name"
-          class="preset-btn"
-          :class="{ active: activePreset === preset.name }"
-          @click="applyPreset(preset)"
-        >
-          {{ preset.name }}
-        </button>
+        <p class="app-subtitle">轻松找到你的宁静</p>
       </div>
     </header>
 
-    <main class="sound-grid">
-      <SoundCard
-        v-for="sound in sounds"
-        :key="sound.id"
-        :sound="sound"
-        @toggle="toggleSound"
-        @volume-change="changeVolume"
-      />
-    </main>
+    <ScenePresets
+      ref="scenePresetsRef"
+      :categories="categories"
+      @apply="applyPreset"
+      @play-sound="onPreviewPlay"
+      @stop-sound="onPreviewStop"
+      @stop-all="stopAllSounds"
+      @update-volume="onUpdateVolume"
+    />
 
     <footer class="app-footer">
       <div class="footer-left">
         <span class="active-count" v-if="activeCount > 0">
-          {{ activeCount }} sound{{ activeCount > 1 ? 's' : '' }} playing
+          {{ activeCount }} 个音效正在播放
         </span>
       </div>
       <div class="footer-center">
@@ -138,7 +154,7 @@ function stopAllSounds() {
           <svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
             <rect x="6" y="6" width="12" height="12" rx="1"/>
           </svg>
-          Stop All
+          全部停止
         </button>
       </div>
       <div class="footer-right">
@@ -170,6 +186,55 @@ function stopAllSounds() {
   background: linear-gradient(145deg, #0a0e17 0%, #111827 50%, #0f1520 100%);
 }
 
+.titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 36px;
+  flex-shrink: 0;
+  user-select: none;
+  --wails-draggable: drag;
+}
+
+.titlebar-drag {
+  flex: 1;
+  padding-left: 16px;
+}
+
+.titlebar-title {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.35);
+  letter-spacing: 0.5px;
+}
+
+.titlebar-controls {
+  display: flex;
+  --wails-draggable: no-drag;
+}
+
+.titlebar-btn {
+  width: 46px;
+  height: 36px;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.5);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+}
+
+.titlebar-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.titlebar-btn-close:hover {
+  background: rgba(255, 60, 60, 0.8);
+  color: white;
+}
+
 .app-header {
   padding: 24px 32px 0;
   flex-shrink: 0;
@@ -177,7 +242,7 @@ function stopAllSounds() {
 
 .header-top {
   text-align: center;
-  margin-bottom: 20px;
+  margin-bottom: 16px;
 }
 
 .app-title {
@@ -193,50 +258,6 @@ function stopAllSounds() {
   color: rgba(255, 255, 255, 0.35);
   margin: 4px 0 0;
   letter-spacing: 0.5px;
-}
-
-.preset-bar {
-  display: flex;
-  gap: 8px;
-  justify-content: center;
-  flex-wrap: wrap;
-  padding-bottom: 16px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-}
-
-.preset-btn {
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 20px;
-  color: rgba(255, 255, 255, 0.55);
-  padding: 6px 16px;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  letter-spacing: 0.3px;
-}
-
-.preset-btn:hover {
-  background: rgba(255, 255, 255, 0.1);
-  color: rgba(255, 255, 255, 0.8);
-  border-color: rgba(255, 255, 255, 0.15);
-}
-
-.preset-btn.active {
-  background: rgba(255, 255, 255, 0.15);
-  color: white;
-  border-color: rgba(255, 255, 255, 0.25);
-}
-
-.sound-grid {
-  flex: 1;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-  gap: 12px;
-  padding: 20px 32px;
-  overflow-y: auto;
-  align-content: start;
 }
 
 .app-footer {
@@ -329,5 +350,15 @@ function stopAllSounds() {
   cursor: pointer;
   border: none;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+}
+
+.titlebar-btn.focus-active {
+  color: rgba(139, 92, 246, 0.9);
+  background: rgba(139, 92, 246, 0.15);
+}
+
+.titlebar-btn:disabled {
+  opacity: 0.25;
+  cursor: not-allowed;
 }
 </style>

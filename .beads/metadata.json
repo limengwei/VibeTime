@@ -1,7 +1,0 @@
-{
-  "database": "dolt",
-  "backend": "dolt",
-  "dolt_mode": "embedded",
-  "dolt_database": "vibe_time",
-  "project_id": "d0928664-9ffb-482f-bf1f-27bdbda14d67"
-}
