@@ -41,7 +41,7 @@ const presets = [
 
 const activePreset = ref(null)
 
-function toggleSound(id) {
+async function toggleSound(id) {
   resumeAudioContext()
   const sound = sounds.find(s => s.id === id)
   if (!sound) return
@@ -50,7 +50,7 @@ function toggleSound(id) {
     stopSound(id)
   } else {
     sound.playing = true
-    startSound(id)
+    await startSound(id)
     setSoundVolume(id, sound.volume)
   }
   activePreset.value = null
@@ -70,21 +70,21 @@ function onMasterVolumeChange(e) {
   setMasterVolume(masterVolume.value)
 }
 
-function applyPreset(preset) {
+async function applyPreset(preset) {
   resumeAudioContext()
   sounds.forEach(s => {
     s.playing = false
     stopSound(s.id)
   })
-  Object.entries(preset.sounds).forEach(([id, vol]) => {
+  for (const [id, vol] of Object.entries(preset.sounds)) {
     const sound = sounds.find(s => s.id === id)
     if (sound) {
       sound.volume = vol
       sound.playing = true
-      startSound(id)
+      await startSound(id)
       setSoundVolume(id, vol)
     }
-  })
+  }
   activePreset.value = preset.name
 }
 
