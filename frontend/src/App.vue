@@ -115,9 +115,6 @@ onMounted(() => {
         <span class="titlebar-title">Vibe Time</span>
       </div>
       <div class="titlebar-controls">
-        <button class="titlebar-btn" :class="{ 'focus-active': focusMode }" :disabled="activeCount === 0" @click="toggleFocusMode" :title="activeCount === 0 ? '请先播放音效' : focusMode ? '退出专注模式' : '专注模式'">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg>
-        </button>
         <button class="titlebar-btn" @click="WindowMinimise" title="最小化">
           <svg width="12" height="12" viewBox="0 0 12 12"><rect y="5" width="12" height="1.5" fill="currentColor"/></svg>
         </button>
@@ -172,6 +169,9 @@ onMounted(() => {
           @input="onMasterVolumeChange"
           class="master-slider"
         />
+        <button class="focus-btn" :class="{ 'focus-active': focusMode }" :disabled="activeCount === 0" @click="toggleFocusMode" :title="activeCount === 0 ? '请先播放音效' : focusMode ? '退出专注模式' : '专注模式'">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        </button>
       </div>
     </footer>
   </div>
@@ -358,6 +358,35 @@ onMounted(() => {
 }
 
 .titlebar-btn:disabled {
+  opacity: 0.25;
+  cursor: not-allowed;
+}
+
+.focus-btn {
+  background: rgba(255, 255, 255, 0.08);
+  border: none;
+  border-radius: 8px;
+  color: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+  padding: 4px 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  margin-left: 8px;
+}
+
+.focus-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.15);
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.focus-btn.focus-active {
+  color: rgba(139, 92, 246, 0.9);
+  background: rgba(139, 92, 246, 0.15);
+}
+
+.focus-btn:disabled {
   opacity: 0.25;
   cursor: not-allowed;
 }
