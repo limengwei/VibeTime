@@ -2,6 +2,17 @@
 
 轻松找到你的宁静 — 一款桌面白噪音/环境音应用，帮助你专注、放松和入眠。
 
+## 截图
+
+<p align="center">
+  <img src="screenshot/ScreenShot_01.png" width="45%" />
+  <img src="screenshot/ScreenShot_02.png" width="45%" />
+</p>
+<p align="center">
+  <img src="screenshot/ScreenShot_03.png" width="45%" />
+  <img src="screenshot/ScreenShot_04.png" width="45%" />
+</p>
+
 ## 功能特性
 
 - **100+ 高品质环境音** — 覆盖 9 大分类：动物、自然、雨声、噪音、场所、物品、交通、城市、双耳节拍
