@@ -11,15 +11,16 @@ permissions:
 jobs:
   release:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
             platform: windows
-            ext: .exe
+            build_tags: ""
             archive: vibe-time-windows-amd64.zip
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             platform: linux
-            ext: ""
+            build_tags: "webkit2_41"
             archive: vibe-time-linux-amd64.tar.gz
 
     runs-on: ${{ matrix.os }}
@@ -42,13 +43,13 @@ jobs:
         if: matrix.platform == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev pkg-config build-essential
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libglib2.0-dev pkg-config build-essential
 
       - name: Install Wails CLI
         run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
 
       - name: Build
-        run: wails build
+        run: wails build ${{ matrix.build_tags != '' && format('-tags "{0}"', matrix.build_tags) || '' }}
         env:
           CGO_ENABLED: 1
 
