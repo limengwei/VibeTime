@@ -4,6 +4,19 @@ let masterGain = null
 const soundFileMap = {}
 const audioBufferCache = {}
 
+async function ensureAudioContext() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)()
+    masterGain = audioCtx.createGain()
+    masterGain.gain.value = 0.8
+    masterGain.connect(audioCtx.destination)
+  }
+  if (audioCtx.state === 'suspended') {
+    await audioCtx.resume()
+  }
+  return audioCtx
+}
+
 function getAudioContext() {
   if (!audioCtx) {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)()
@@ -17,8 +30,8 @@ function getAudioContext() {
   return audioCtx
 }
 
-function getMasterGain() {
-  getAudioContext()
+async function getMasterGain() {
+  await ensureAudioContext()
   return masterGain
 }
 
@@ -42,7 +55,7 @@ async function loadAudioBuffer(type) {
     const response = await fetch(url)
     if (!response.ok) return null
     const arrayBuffer = await response.arrayBuffer()
-    const ctx = getAudioContext()
+    const ctx = await ensureAudioContext()
     const audioBuffer = await ctx.decodeAudioData(arrayBuffer)
     audioBufferCache[type] = audioBuffer
     return audioBuffer
@@ -55,10 +68,8 @@ async function loadAudioBuffer(type) {
 class FileAudioPlayer {
   constructor(type) {
     this.type = type
-    this.ctx = getAudioContext()
-    this.output = this.ctx.createGain()
-    this.output.gain.value = 0
-    this.output.connect(getMasterGain())
+    this.ctx = null
+    this.output = null
     this.source = null
     this.playing = false
     this.volume = 0.5
@@ -68,6 +79,12 @@ class FileAudioPlayer {
   async start() {
     if (this.playing) return
     this.playing = true
+    const ctx = await ensureAudioContext()
+    this.ctx = ctx
+    this.output = ctx.createGain()
+    this.output.gain.value = 0
+    const mg = await getMasterGain()
+    this.output.connect(mg)
     if (!this.buffer) {
       this.buffer = await loadAudioBuffer(this.type)
     }
@@ -128,7 +145,7 @@ class FileAudioPlayer {
 const activePlayers = {}
 
 export async function startSound(type) {
-  getAudioContext()
+  await ensureAudioContext()
   if (activePlayers[type]) {
     activePlayers[type].stop()
     delete activePlayers[type]
@@ -156,9 +173,10 @@ export function setSoundVolume(type, volume) {
   }
 }
 
-export function setMasterVolume(volume) {
-  const mg = getMasterGain()
-  const now = getAudioContext().currentTime
+export async function setMasterVolume(volume) {
+  const mg = await getMasterGain()
+  const ctx = await ensureAudioContext()
+  const now = ctx.currentTime
   mg.gain.cancelScheduledValues(now)
   mg.gain.setValueAtTime(mg.gain.value, now)
   mg.gain.linearRampToValueAtTime(volume, now + 0.05)
@@ -171,6 +189,6 @@ export function stopAll() {
   })
 }
 
-export function resumeAudioContext() {
-  getAudioContext()
+export async function resumeAudioContext() {
+  await ensureAudioContext()
 }
