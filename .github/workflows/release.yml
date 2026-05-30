@@ -51,14 +51,13 @@ jobs:
         env:
           CGO_ENABLED: 1
 
-      - name: Package Windows installer
+      - name: Package Windows
         if: matrix.platform == 'windows'
         shell: bash
         run: |
           mkdir -p build/bin/frontend
           cp -rf frontend/dist build/bin/frontend/
-          makensis installer.nsi
-          mv vibe-time-setup.exe build/bin/vibe-time-setup.exe
+          cd build/bin && zip -r ../vibe-time-windows-amd64.zip . && cd ../..
 
       - name: Package Linux
         if: matrix.platform == 'linux'
@@ -71,5 +70,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            build/bin/vibe-time-setup.exe
+            vibe-time-windows-amd64.zip
             vibe-time-linux-amd64.tar.gz
