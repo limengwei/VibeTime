@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	_ "embed"
+	"io/fs"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -18,7 +19,9 @@ import (
 //go:embed build/windows/icon.ico
 var trayIcon []byte
 
-func getAssetsDir() string {
+var assetsDir string
+
+func resolveAssetsDir() string {
 	candidates := []string{}
 
 	if exePath, err := os.Executable(); err == nil {
@@ -35,12 +38,12 @@ func getAssetsDir() string {
 		}
 	}
 
-	panic("frontend/dist not found in any candidate path")
+	return ""
 }
 
 func main() {
 	app := NewApp()
-	assetsDir := getAssetsDir()
+	assetsDir = resolveAssetsDir()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -77,6 +80,11 @@ func main() {
 		os.Exit(0)
 	}()
 
+	var assetFS fs.FS
+	if assetsDir != "" {
+		assetFS = os.DirFS(assetsDir)
+	}
+
 	err := wails.Run(&options.App{
 		Title:     "Vibe Time",
 		Width:     900,
@@ -85,7 +93,7 @@ func main() {
 		MinHeight: 500,
 		Frameless: true,
 		AssetServer: &assetserver.Options{
-			Assets: os.DirFS(assetsDir),
+			Assets: assetFS,
 		},
 		BackgroundColour: &options.RGBA{R: 10, G: 14, B: 23, A: 255},
 		OnStartup:        app.startup,
