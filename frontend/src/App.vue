@@ -11,8 +11,7 @@ import {
   setMasterVolume,
   stopAll,
   resumeAudioContext,
-  registerSounds,
-  preloadSounds
+  registerSounds
 } from './audio/audioEngine.js'
 
 const categories = ref([])
@@ -101,7 +100,6 @@ async function loadSounds() {
     })
   })
   registerSounds(allSnds)
-  preloadSounds(allSnds.map(s => s.id))
 }
 
 onMounted(() => {

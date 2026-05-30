@@ -3,6 +3,9 @@ let masterGain = null
 
 const soundFileMap = {}
 const audioBufferCache = {}
+const MAX_CACHE_SIZE = 8
+
+const cacheOrder = []
 
 function getAudioContext() {
   if (!audioCtx) {
@@ -34,8 +37,27 @@ export function registerSounds(sounds) {
   })
 }
 
+function evictCache() {
+  while (cacheOrder.length > MAX_CACHE_SIZE) {
+    const oldId = cacheOrder.shift()
+    if (oldId && audioBufferCache[oldId] && !activePlayers[oldId]) {
+      delete audioBufferCache[oldId]
+    }
+  }
+}
+
+function touchCache(id) {
+  const idx = cacheOrder.indexOf(id)
+  if (idx !== -1) {
+    cacheOrder.splice(idx, 1)
+  }
+  cacheOrder.push(id)
+  evictCache()
+}
+
 async function loadAudioBuffer(id) {
   if (audioBufferCache[id]) {
+    touchCache(id)
     return audioBufferCache[id]
   }
   const url = soundFileMap[id]
@@ -47,6 +69,7 @@ async function loadAudioBuffer(id) {
     const ctx = getAudioContext()
     const audioBuffer = await ctx.decodeAudioData(arrayBuffer)
     audioBufferCache[id] = audioBuffer
+    touchCache(id)
     return audioBuffer
   } catch (e) {
     console.warn('Failed to load audio:', id, e)
@@ -54,9 +77,12 @@ async function loadAudioBuffer(id) {
   }
 }
 
-export async function preloadSounds(ids) {
-  const promises = ids.map(id => loadAudioBuffer(id))
-  await Promise.allSettled(promises)
+export function releaseBuffer(id) {
+  if (audioBufferCache[id] && !activePlayers[id]) {
+    delete audioBufferCache[id]
+    const idx = cacheOrder.indexOf(id)
+    if (idx !== -1) cacheOrder.splice(idx, 1)
+  }
 }
 
 class FileAudioPlayer {
@@ -131,10 +157,7 @@ export async function startSound(id) {
     delete activePlayers[id]
   }
 
-  let buffer = audioBufferCache[id]
-  if (!buffer) {
-    buffer = await loadAudioBuffer(id)
-  }
+  const buffer = await loadAudioBuffer(id)
   if (!buffer) {
     console.warn('No audio buffer for:', id)
     return
@@ -150,6 +173,7 @@ export function stopSound(id) {
   if (activePlayers[id]) {
     activePlayers[id].stop()
     delete activePlayers[id]
+    releaseBuffer(id)
   }
 }
 
@@ -168,6 +192,7 @@ export function stopAll() {
   Object.keys(activePlayers).forEach(id => {
     activePlayers[id].stop()
     delete activePlayers[id]
+    releaseBuffer(id)
   })
 }
 
