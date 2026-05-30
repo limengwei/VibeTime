@@ -4,22 +4,11 @@ let masterGain = null
 const soundFileMap = {}
 const audioBufferCache = {}
 
-async function ensureAudioContext() {
-  if (!audioCtx) {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)()
-    masterGain = audioCtx.createGain()
-    masterGain.gain.value = 0.8
-    masterGain.connect(audioCtx.destination)
-  }
-  if (audioCtx.state === 'suspended') {
-    await audioCtx.resume()
-  }
-  return audioCtx
-}
-
 function getAudioContext() {
   if (!audioCtx) {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)()
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)({
+      latencyHint: 'playback'
+    })
     masterGain = audioCtx.createGain()
     masterGain.gain.value = 0.8
     masterGain.connect(audioCtx.destination)
@@ -30,8 +19,8 @@ function getAudioContext() {
   return audioCtx
 }
 
-async function getMasterGain() {
-  await ensureAudioContext()
+function getMasterGainNode() {
+  getAudioContext()
   return masterGain
 }
 
@@ -45,150 +34,143 @@ export function registerSounds(sounds) {
   })
 }
 
-async function loadAudioBuffer(type) {
-  if (audioBufferCache[type]) {
-    return audioBufferCache[type]
+async function loadAudioBuffer(id) {
+  if (audioBufferCache[id]) {
+    return audioBufferCache[id]
   }
-  const url = soundFileMap[type]
+  const url = soundFileMap[id]
   if (!url) return null
   try {
     const response = await fetch(url)
     if (!response.ok) return null
     const arrayBuffer = await response.arrayBuffer()
-    const ctx = await ensureAudioContext()
+    const ctx = getAudioContext()
     const audioBuffer = await ctx.decodeAudioData(arrayBuffer)
-    audioBufferCache[type] = audioBuffer
+    audioBufferCache[id] = audioBuffer
     return audioBuffer
   } catch (e) {
-    console.warn(`Failed to load audio file for ${type}:`, e)
+    console.warn('Failed to load audio:', id, e)
     return null
   }
 }
 
+export async function preloadSounds(ids) {
+  const promises = ids.map(id => loadAudioBuffer(id))
+  await Promise.allSettled(promises)
+}
+
 class FileAudioPlayer {
-  constructor(type) {
-    this.type = type
-    this.ctx = null
-    this.output = null
+  constructor(id) {
+    this.id = id
     this.source = null
+    this.gainNode = null
     this.playing = false
     this.volume = 0.5
-    this.buffer = null
+    this._stopping = false
   }
 
-  async start() {
+  start(buffer) {
     if (this.playing) return
     this.playing = true
-    const ctx = await ensureAudioContext()
-    this.ctx = ctx
-    this.output = ctx.createGain()
-    this.output.gain.value = 0
-    const mg = await getMasterGain()
-    this.output.connect(mg)
-    if (!this.buffer) {
-      this.buffer = await loadAudioBuffer(this.type)
-    }
-    if (!this.buffer || !this.playing) {
-      return false
-    }
-    this._playBuffer()
-    return true
-  }
+    const ctx = getAudioContext()
 
-  _playBuffer() {
-    this.source = this.ctx.createBufferSource()
-    this.source.buffer = this.buffer
+    this.gainNode = ctx.createGain()
+    this.gainNode.gain.value = 0
+    this.gainNode.connect(masterGain)
+
+    this.source = ctx.createBufferSource()
+    this.source.buffer = buffer
     this.source.loop = true
-    this.source.connect(this.output)
-    this._fadeIn()
+    this.source.connect(this.gainNode)
+
+    const now = ctx.currentTime
+    this.gainNode.gain.setValueAtTime(0, now)
+    this.gainNode.gain.linearRampToValueAtTime(this.volume, now + 0.3)
+
     this.source.start()
   }
 
   stop() {
+    if (!this.playing || this._stopping) return
+    this._stopping = true
     this.playing = false
-    this._fadeOut(() => {
-      if (this.source) {
-        try { this.source.stop() } catch (e) { /* already stopped */ }
-        this.source = null
-      }
-    })
+
+    const ctx = getAudioContext()
+    const gain = this.gainNode
+    const src = this.source
+
+    if (gain) {
+      const now = ctx.currentTime
+      gain.gain.cancelScheduledValues(now)
+      gain.gain.setValueAtTime(gain.gain.value, now)
+      gain.gain.linearRampToValueAtTime(0, now + 0.15)
+    }
+
+    setTimeout(() => {
+      try { src && src.stop() } catch (e) {}
+      try { gain && gain.disconnect() } catch (e) {}
+      this._stopping = false
+    }, 200)
   }
 
   setVolume(v) {
     this.volume = v
-    if (this.playing) {
-      const now = this.ctx.currentTime
-      this.output.gain.cancelScheduledValues(now)
-      this.output.gain.setValueAtTime(this.output.gain.value, now)
-      this.output.gain.linearRampToValueAtTime(v, now + 0.05)
-    }
-  }
-
-  _fadeIn() {
-    const now = this.ctx.currentTime
-    this.output.gain.cancelScheduledValues(now)
-    this.output.gain.setValueAtTime(0, now)
-    this.output.gain.linearRampToValueAtTime(this.volume, now + 0.5)
-  }
-
-  _fadeOut(callback) {
-    const now = this.ctx.currentTime
-    this.output.gain.cancelScheduledValues(now)
-    this.output.gain.setValueAtTime(this.output.gain.value, now)
-    this.output.gain.linearRampToValueAtTime(0, now + 0.3)
-    if (callback) {
-      setTimeout(callback, 350)
+    if (this.gainNode && this.playing) {
+      this.gainNode.gain.value = v
     }
   }
 }
 
 const activePlayers = {}
 
-export async function startSound(type) {
-  await ensureAudioContext()
-  if (activePlayers[type]) {
-    activePlayers[type].stop()
-    delete activePlayers[type]
+export async function startSound(id) {
+  getAudioContext()
+
+  if (activePlayers[id]) {
+    activePlayers[id].stop()
+    delete activePlayers[id]
   }
-  const player = new FileAudioPlayer(type)
-  player.volume = 0.5
-  const loaded = await player.start()
-  if (loaded) {
-    activePlayers[type] = player
+
+  let buffer = audioBufferCache[id]
+  if (!buffer) {
+    buffer = await loadAudioBuffer(id)
+  }
+  if (!buffer) {
+    console.warn('No audio buffer for:', id)
     return
   }
-  console.warn(`No audio file found for ${type}`)
+
+  const player = new FileAudioPlayer(id)
+  player.volume = 0.5
+  player.start(buffer)
+  activePlayers[id] = player
 }
 
-export function stopSound(type) {
-  if (activePlayers[type]) {
-    activePlayers[type].stop()
-    delete activePlayers[type]
+export function stopSound(id) {
+  if (activePlayers[id]) {
+    activePlayers[id].stop()
+    delete activePlayers[id]
   }
 }
 
-export function setSoundVolume(type, volume) {
-  if (activePlayers[type]) {
-    activePlayers[type].setVolume(volume)
+export function setSoundVolume(id, volume) {
+  if (activePlayers[id]) {
+    activePlayers[id].setVolume(volume)
   }
 }
 
-export async function setMasterVolume(volume) {
-  const mg = await getMasterGain()
-  const ctx = await ensureAudioContext()
-  const now = ctx.currentTime
-  mg.gain.cancelScheduledValues(now)
-  mg.gain.setValueAtTime(mg.gain.value, now)
-  mg.gain.linearRampToValueAtTime(volume, now + 0.05)
+export function setMasterVolume(volume) {
+  const mg = getMasterGainNode()
+  mg.gain.value = volume
 }
 
 export function stopAll() {
-  Object.keys(activePlayers).forEach(type => {
-    activePlayers[type].stop()
-    delete activePlayers[type]
+  Object.keys(activePlayers).forEach(id => {
+    activePlayers[id].stop()
+    delete activePlayers[id]
   })
 }
 
-export async function resumeAudioContext() {
-  await ensureAudioContext()
+export function resumeAudioContext() {
+  getAudioContext()
 }

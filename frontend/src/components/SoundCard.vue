@@ -1,5 +1,5 @@
 <script setup>
-import { ref } from 'vue'
+import { computed } from 'vue'
 import { getIconSvg } from '../audio/soundIcons.js'
 
 const props = defineProps({
@@ -11,27 +11,24 @@ const props = defineProps({
 
 const emit = defineEmits(['toggle', 'volume-change'])
 
-const isHovered = ref(false)
+const iconSvg = computed(() => getIconSvg(props.sound.iconKey))
 
 function onToggle() {
   emit('toggle', props.sound.id)
 }
 
 function onVolumeChange(e) {
-  const v = parseFloat(e.target.value)
-  emit('volume-change', props.sound.id, v)
+  emit('volume-change', props.sound.id, parseFloat(e.target.value))
 }
 </script>
 
 <template>
   <div
     class="sound-card"
-    :class="{ active: sound.playing, hovered: isHovered }"
-    @mouseenter="isHovered = true"
-    @mouseleave="isHovered = false"
+    :class="{ active: sound.playing }"
     @click="onToggle"
   >
-    <div class="sound-icon" v-html="getIconSvg(sound.iconKey)"></div>
+    <div class="sound-icon" v-html="iconSvg"></div>
     <div class="sound-name">{{ sound.name }}</div>
     <div class="sound-desc">{{ sound.description }}</div>
     <div class="volume-control" @click.stop>
@@ -43,7 +40,7 @@ function onVolumeChange(e) {
         :value="sound.volume"
         @input="onVolumeChange"
         class="volume-slider"
-        :class="{ visible: sound.playing || isHovered }"
+        :class="{ visible: sound.playing }"
       />
     </div>
     <div class="volume-label" v-if="sound.playing">
@@ -59,7 +56,7 @@ function onVolumeChange(e) {
   border-radius: 16px;
   padding: 20px 16px 16px;
   cursor: pointer;
-  transition: all 0.3s ease;
+  transition: background 0.3s ease, border-color 0.3s ease;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -71,7 +68,6 @@ function onVolumeChange(e) {
 .sound-card:hover {
   background: rgba(255, 255, 255, 0.08);
   border-color: rgba(255, 255, 255, 0.12);
-  transform: translateY(-2px);
 }
 
 .sound-card.active {
@@ -136,6 +132,10 @@ function onVolumeChange(e) {
 }
 
 .volume-slider.visible {
+  opacity: 1;
+}
+
+.sound-card:hover .volume-slider:not(.visible) {
   opacity: 1;
 }
 
