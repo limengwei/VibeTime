@@ -4,6 +4,8 @@ import (
 	"context"
 	"embed"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"fyne.io/systray"
 	"github.com/wailsapp/wails/v2"
@@ -20,6 +22,9 @@ var trayIcon []byte
 
 func main() {
 	app := NewApp()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	loop, _ := systray.RunWithExternalLoop(func() {
 		systray.SetIcon(trayIcon)
@@ -47,6 +52,11 @@ func main() {
 	})
 
 	go loop()
+
+	go func() {
+		<-sigCh
+		systray.Quit()
+	}()
 
 	err := wails.Run(&options.App{
 		Title:     "Vibe Time",
