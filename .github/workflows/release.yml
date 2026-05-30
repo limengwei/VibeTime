@@ -65,9 +65,10 @@ jobs:
       - name: Package Linux
         if: matrix.platform == 'linux'
         run: |
-          mkdir -p build/bin/vibe-time/frontend
-          cp -r frontend/dist build/bin/vibe-time/frontend/
-          tar -czvf vibe-time-linux-amd64.tar.gz -C build/bin vibe-time
+          mkdir -p build/bin/package/frontend
+          cp -r frontend/dist build/bin/package/frontend/
+          cp build/bin/vibe-time build/bin/package/
+          tar -czvf vibe-time-linux-amd64.tar.gz -C build/bin/package .
 
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v2
