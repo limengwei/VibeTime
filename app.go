@@ -61,15 +61,20 @@ func (a *App) QuitApp() {
 	os.Exit(0)
 }
 
+func (a *App) getFS() fs.FS {
+	return os.DirFS(getAssetsDir())
+}
+
 func (a *App) ListSounds() []CategoryInfo {
 	categories := []CategoryInfo{}
 
-	sub, err := fs.Sub(assets, "frontend/dist/audio")
-	if err != nil {
+	fsys := a.getFS()
+	if fsys == nil {
 		return categories
 	}
 
-	entries, err := fs.ReadDir(sub, ".")
+	audioDir := "audio"
+	entries, err := fs.ReadDir(fsys, audioDir)
 	if err != nil {
 		return categories
 	}
@@ -81,7 +86,7 @@ func (a *App) ListSounds() []CategoryInfo {
 		catID := entry.Name()
 		catTitle := categoryTitle(catID)
 
-		soundFiles, err := fs.ReadDir(sub, catID)
+		soundFiles, err := fs.ReadDir(fsys, filepath.Join(audioDir, catID))
 		if err != nil {
 			continue
 		}
@@ -128,12 +133,12 @@ func (a *App) ListSounds() []CategoryInfo {
 func (a *App) ListWallpapers() []WallpaperInfo {
 	wallpapers := []WallpaperInfo{}
 
-	sub, err := fs.Sub(assets, "frontend/dist/wallpapers")
-	if err != nil {
+	fsys := a.getFS()
+	if fsys == nil {
 		return wallpapers
 	}
 
-	entries, err := fs.ReadDir(sub, ".")
+	entries, err := fs.ReadDir(fsys, "wallpapers")
 	if err != nil {
 		return wallpapers
 	}

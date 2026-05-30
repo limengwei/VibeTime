@@ -2,9 +2,10 @@ package main
 
 import (
 	"context"
-	"embed"
+	_ "embed"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"fyne.io/systray"
@@ -14,14 +15,20 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-//go:embed all:frontend/dist
-var assets embed.FS
-
 //go:embed build/windows/icon.ico
 var trayIcon []byte
 
+func getAssetsDir() string {
+	exePath, err := os.Executable()
+	if err != nil {
+		panic("cannot determine executable path: " + err.Error())
+	}
+	return filepath.Join(filepath.Dir(exePath), "frontend", "dist")
+}
+
 func main() {
 	app := NewApp()
+	assetsDir := getAssetsDir()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -66,7 +73,7 @@ func main() {
 		MinHeight: 500,
 		Frameless: true,
 		AssetServer: &assetserver.Options{
-			Assets: assets,
+			Assets: os.DirFS(assetsDir),
 		},
 		BackgroundColour: &options.RGBA{R: 10, G: 14, B: 23, A: 255},
 		OnStartup:        app.startup,
