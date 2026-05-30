@@ -1,6 +1,8 @@
 <script setup>
 import { ref, computed, reactive, nextTick } from 'vue'
 import { getIconSvg } from '../audio/soundIcons.js'
+import { encodeRecipe, decodeRecipe } from '../utils/recipeCode.js'
+import { generateRecipeCard } from '../utils/recipeCard.js'
 
 const props = defineProps({
   categories: { type: Array, required: true }
@@ -221,6 +223,17 @@ const formIcon = ref('')
 const formDesc = ref('')
 const formSelectedSounds = reactive({})
 
+const showImportModal = ref(false)
+const importCode = ref('')
+const toastVisible = ref(false)
+const toastMessage = ref('')
+let toastTimer = null
+
+const showCardModal = ref(false)
+const cardImageUrl = ref('')
+const cardPresetName = ref('')
+const shareRecipeCode = ref('')
+
 const formSelectedCount = computed(() => Object.keys(formSelectedSounds).length)
 
 function autoDesc() {
@@ -386,6 +399,138 @@ function onActiveVolumeChange(soundId, volume) {
 function onOverlayClick(e) {
   if (e.target === e.currentTarget) closeModal()
 }
+
+function copyRecipeCode(preset) {
+  let sounds = preset.sounds
+  if (activePresetId.value === preset.id) {
+    sounds = { ...activeVolumes }
+  }
+  const code = encodeRecipe({ name: preset.name, icon: preset.icon, desc: preset.desc, sounds })
+  if (!code) {
+    showToast('❌ 无法编码空配方')
+    return
+  }
+  try {
+    navigator.clipboard.writeText(code).then(() => {
+      showToast(`✅ 已复制「${preset.name}」配方码`)
+    }).catch(() => {
+      showToast('📋 配方码已生成，请手动复制')
+    })
+  } catch {
+    showToast('📋 配方码已生成')
+  }
+}
+
+function openImportModal() {
+  importCode.value = ''
+  showImportModal.value = true
+}
+
+function closeImportModal() {
+  showImportModal.value = false
+  importCode.value = ''
+}
+
+function importPreset() {
+  const code = importCode.value.trim()
+  if (!code) return
+
+  const decoded = decodeRecipe(code)
+  if (!decoded) {
+    showToast('❌ 配方码无效或已损坏')
+    return
+  }
+
+  let name = decoded.name
+  if (allPresets.value.some(p => p.name === name)) {
+    name = decoded.name + ' 📥'
+  }
+
+  const newPreset = {
+    id: 'custom_' + Date.now(),
+    name,
+    icon: decoded.icon || '🎵',
+    desc: decoded.desc || '',
+    sounds: decoded.sounds,
+    custom: true
+  }
+
+  customPresets.value.push(newPreset)
+  saveCustomPresetsToStorage(customPresets.value)
+  closeImportModal()
+  showToast(`✅ 已导入配方「${decoded.name}」`)
+
+  const soundsCopy = { ...decoded.sounds }
+  emit('apply', soundsCopy)
+}
+
+function showToast(msg) {
+  toastMessage.value = msg
+  toastVisible.value = true
+  if (toastTimer) clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => {
+    toastVisible.value = false
+    toastTimer = null
+  }, 2500)
+}
+
+async function openShareModal(preset) {
+  let sounds = preset.sounds
+  if (activePresetId.value === preset.id) {
+    sounds = { ...activeVolumes }
+  }
+  const code = encodeRecipe({ name: preset.name, icon: preset.icon, desc: preset.desc, sounds })
+  if (!code) {
+    showToast('❌ 无法分享空配方')
+    return
+  }
+  shareRecipeCode.value = code
+  cardPresetName.value = preset.name
+  try {
+    const blob = await generateRecipeCard(
+      { name: preset.name, icon: preset.icon, desc: preset.desc, sounds },
+      code
+    )
+    cardImageUrl.value = URL.createObjectURL(blob)
+  } catch {
+    // 卡片生成失败不影响声音码分享
+    cardImageUrl.value = ''
+  }
+  showCardModal.value = true
+}
+
+function closeCardModal() {
+  showCardModal.value = false
+  shareRecipeCode.value = ''
+  if (cardImageUrl.value) {
+    URL.revokeObjectURL(cardImageUrl.value)
+    cardImageUrl.value = ''
+  }
+}
+
+function downloadCard() {
+  if (!cardImageUrl.value) return
+  const a = document.createElement('a')
+  a.href = cardImageUrl.value
+  a.download = `VibeTime-${cardPresetName.value || 'recipe'}.png`
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+}
+
+function copyShareCode() {
+  const code = shareRecipeCode.value
+  if (!code) return
+  try {
+    navigator.clipboard.writeText(code).then(() => {
+      showToast(`✅ 已复制「${cardPresetName.value}」声音码`)
+    }).catch(() => {
+      showToast('📋 声音码已生成，请手动复制')
+    })
+  } catch {
+    showToast('📋 声音码已生成')
+  }
+}
 </script>
 
 <template>
@@ -414,6 +559,13 @@ function onOverlayClick(e) {
         >
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
         </button>
+        <button
+          class="card-action card-share"
+          @click.stop="openShareModal(preset)"
+          title="分享"
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>
+        </button>
         <div class="card-icon">{{ preset.icon }}</div>
         <div class="card-name">{{ preset.name }}</div>
         <div class="card-desc">{{ preset.desc }}</div>
@@ -428,6 +580,14 @@ function onOverlayClick(e) {
         </div>
         <div class="card-name">添加场景</div>
         <div class="card-desc">自定义声音组合</div>
+      </div>
+
+      <div class="scene-card scene-card-import" @click="openImportModal">
+        <div class="add-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        </div>
+        <div class="card-name">导入配方</div>
+        <div class="card-desc">粘贴配方码</div>
       </div>
     </div>
 
@@ -536,6 +696,61 @@ function onOverlayClick(e) {
             <button class="btn-save" @click="savePreset" :disabled="!formName.trim() || formSelectedCount === 0">
               {{ editingPreset ? '保存修改' : '添加场景' }}
             </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <Teleport to="body">
+      <div v-if="showImportModal" class="modal-overlay" @click.self="closeImportModal">
+        <div class="modal-container import-modal">
+          <div class="modal-header">
+            <h3>导入配方码</h3>
+            <button class="modal-close" @click="closeImportModal">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+          </div>
+          <div class="modal-body">
+            <p class="import-hint">粘贴好友分享的 VibeTime 配方码</p>
+            <textarea
+              v-model="importCode"
+              class="import-textarea"
+              placeholder="VIBE:..."
+              rows="2"
+              @keydown.ctrl.enter="importPreset"
+              @keydown.meta.enter="importPreset"
+            ></textarea>
+          </div>
+          <div class="modal-footer">
+            <button class="btn-cancel" @click="closeImportModal">取消</button>
+            <button class="btn-save" @click="importPreset" :disabled="!importCode.trim()">导入</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <Teleport to="body">
+      <Transition name="toast">
+        <div v-if="toastVisible" class="toast">{{ toastMessage }}</div>
+      </Transition>
+    </Teleport>
+
+    <Teleport to="body">
+      <div v-if="showCardModal" class="modal-overlay" @click.self="closeCardModal">
+        <div class="card-modal-container">
+          <div class="card-modal-header">
+            <h3>🎴 {{ cardPresetName }}</h3>
+            <button class="modal-close" @click="closeCardModal">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+          </div>
+          <div class="card-modal-body">
+            <img v-if="cardImageUrl" :src="cardImageUrl" class="card-preview" alt="声音卡片预览" />
+          </div>
+          <div class="card-modal-footer">
+            <button class="btn-cancel" @click="closeCardModal">关闭</button>
+            <button class="btn-share-code" @click="copyShareCode">📋 复制声音码</button>
+            <button class="btn-save" @click="downloadCard" :disabled="!cardImageUrl">💾 保存图片</button>
           </div>
         </div>
       </div>
@@ -1105,5 +1320,170 @@ function onOverlayClick(e) {
 .btn-save:disabled {
   opacity: 0.3;
   cursor: not-allowed;
+}
+
+.btn-share-code {
+  padding: 9px 22px;
+  border-radius: 10px;
+  border: none;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  background: rgba(139, 92, 246, 0.3);
+  color: rgba(255, 255, 255, 0.95);
+}
+
+.btn-share-code:hover {
+  background: rgba(139, 92, 246, 0.45);
+}
+
+.card-share {
+  left: 6px;
+}
+
+.card-share:hover {
+  color: rgba(139, 92, 246, 0.8);
+  background: rgba(139, 92, 246, 0.15);
+}
+
+.scene-card-import {
+  border-style: dashed;
+  border-color: rgba(255, 255, 255, 0.1);
+  background: transparent;
+}
+
+.scene-card-import:hover {
+  border-color: rgba(52, 211, 153, 0.4);
+  background: rgba(52, 211, 153, 0.06);
+}
+
+.scene-card-import:hover .add-icon {
+  color: rgba(52, 211, 153, 0.6);
+}
+
+.import-modal {
+  width: 420px;
+}
+
+.import-hint {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.45);
+  margin-bottom: 12px;
+  line-height: 1.4;
+}
+
+.import-textarea {
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 13px;
+  font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+  outline: none;
+  resize: vertical;
+  transition: border-color 0.2s ease;
+  line-height: 1.5;
+}
+
+.import-textarea:focus {
+  border-color: rgba(139, 92, 246, 0.5);
+}
+
+.import-textarea::placeholder {
+  color: rgba(255, 255, 255, 0.2);
+}
+
+.toast {
+  position: fixed;
+  bottom: 40px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(20, 25, 36, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  padding: 12px 24px;
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(12px);
+  z-index: 300;
+  white-space: nowrap;
+  max-width: 90vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.toast-enter-active {
+  transition: all 0.25s ease;
+}
+
+.toast-leave-active {
+  transition: all 0.2s ease;
+}
+
+.toast-enter-from {
+  opacity: 0;
+  transform: translateX(-50%) translateY(12px);
+}
+
+.toast-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(-4px);
+}
+
+.card-modal-container {
+  background: #141924;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 20px;
+  width: 480px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+  animation: slideUp 0.2s ease;
+}
+
+.card-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 24px 0;
+  flex-shrink: 0;
+}
+
+.card-modal-header h3 {
+  font-size: 17px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9);
+  margin: 0;
+}
+
+.card-modal-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 24px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.card-preview {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  border-radius: 12px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+}
+
+.card-modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 24px 20px;
+  flex-shrink: 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
 </style>
