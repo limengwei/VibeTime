@@ -7,8 +7,8 @@
 <p align="center">轻松找到你的宁静 — 一款桌面白噪音/环境音应用，帮助你专注、放松和入眠。</p>
 
 <p align="center">
-  <a href="https://github.com/limengwei/VibeTime/releases/tag/v1.0.1">
-    <img src="https://img.shields.io/badge/下载-v1.0.1-blue?style=for-the-badge" alt="Download v1.0.1" />
+  <a href="https://github.com/limengwei/VibeTime/releases/tag/v1.0.2">
+    <img src="https://img.shields.io/badge/下载-v1.0.2-blue?style=for-the-badge" alt="Download v1.0.2" />
   </a>
 </p>
 
