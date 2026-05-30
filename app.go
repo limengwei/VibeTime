@@ -62,13 +62,19 @@ func (a *App) QuitApp() {
 }
 
 func (a *App) getFS() fs.FS {
-	return os.DirFS(getAssetsDir())
+	if assetsDir == "" {
+		return nil
+	}
+	return os.DirFS(assetsDir)
 }
 
 func (a *App) ListSounds() []CategoryInfo {
 	categories := []CategoryInfo{}
 
 	fsys := a.getFS()
+	if fsys == nil {
+		return categories
+	}
 
 	audioDir := "audio"
 	entries, err := fs.ReadDir(fsys, audioDir)
@@ -131,6 +137,9 @@ func (a *App) ListWallpapers() []WallpaperInfo {
 	wallpapers := []WallpaperInfo{}
 
 	fsys := a.getFS()
+	if fsys == nil {
+		return wallpapers
+	}
 
 	entries, err := fs.ReadDir(fsys, "wallpapers")
 	if err != nil {
