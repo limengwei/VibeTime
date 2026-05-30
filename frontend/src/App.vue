@@ -71,8 +71,7 @@ async function onPreviewPlay(id, vol) {
   if (!soundStates[id]) soundStates[id] = { playing: false, volume: 0.5 }
   soundStates[id].playing = true
   soundStates[id].volume = vol
-  await startSound(id)
-  setSoundVolume(id, vol)
+  await startSound(id, vol)
 }
 
 function onPreviewStop(id) {

@@ -142,6 +142,8 @@ class FileAudioPlayer {
   setVolume(v) {
     this.volume = v
     if (this.gainNode && this.playing) {
+      const ctx = getAudioContext()
+      this.gainNode.gain.cancelScheduledValues(ctx.currentTime)
       this.gainNode.gain.value = v
     }
   }
@@ -149,7 +151,7 @@ class FileAudioPlayer {
 
 const activePlayers = {}
 
-export async function startSound(id) {
+export async function startSound(id, startVolume = 0.5) {
   getAudioContext()
 
   if (activePlayers[id]) {
@@ -164,7 +166,7 @@ export async function startSound(id) {
   }
 
   const player = new FileAudioPlayer(id)
-  player.volume = 0.5
+  player.volume = startVolume
   player.start(buffer)
   activePlayers[id] = player
 }
