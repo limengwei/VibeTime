@@ -55,7 +55,7 @@ func main() {
 
 	go func() {
 		<-sigCh
-		systray.Quit()
+		os.Exit(0)
 	}()
 
 	err := wails.Run(&options.App{
