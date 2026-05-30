@@ -69,9 +69,6 @@ func (a *App) ListSounds() []CategoryInfo {
 	categories := []CategoryInfo{}
 
 	fsys := a.getFS()
-	if fsys == nil {
-		return categories
-	}
 
 	audioDir := "audio"
 	entries, err := fs.ReadDir(fsys, audioDir)
@@ -86,7 +83,7 @@ func (a *App) ListSounds() []CategoryInfo {
 		catID := entry.Name()
 		catTitle := categoryTitle(catID)
 
-		soundFiles, err := fs.ReadDir(fsys, filepath.Join(audioDir, catID))
+		soundFiles, err := fs.ReadDir(fsys, audioDir+"/"+catID)
 		if err != nil {
 			continue
 		}
@@ -134,9 +131,6 @@ func (a *App) ListWallpapers() []WallpaperInfo {
 	wallpapers := []WallpaperInfo{}
 
 	fsys := a.getFS()
-	if fsys == nil {
-		return wallpapers
-	}
 
 	entries, err := fs.ReadDir(fsys, "wallpapers")
 	if err != nil {
