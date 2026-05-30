@@ -17,11 +17,9 @@ jobs:
           - os: windows-latest
             platform: windows
             build_tags: ""
-            archive: vibe-time-windows-amd64.zip
           - os: ubuntu-22.04
             platform: linux
             build_tags: "webkit2_41"
-            archive: vibe-time-linux-amd64.tar.gz
 
     runs-on: ${{ matrix.os }}
 
@@ -53,15 +51,25 @@ jobs:
         env:
           CGO_ENABLED: 1
 
-      - name: Package (Windows)
+      - name: Package Windows installer
         if: matrix.platform == 'windows'
-        run: Compress-Archive -Path build/bin/vibe-time.exe -DestinationPath build/bin/${{ matrix.archive }}
+        shell: bash
+        run: |
+          mkdir -p build/bin/frontend
+          cp -rf frontend/dist build/bin/frontend/
+          makensis installer.nsi
+          mv vibe-time-setup.exe build/bin/vibe-time-setup.exe
 
-      - name: Package (Linux)
+      - name: Package Linux
         if: matrix.platform == 'linux'
-        run: tar -czvf build/bin/${{ matrix.archive }} -C build/bin vibe-time
+        run: |
+          mkdir -p build/bin/vibe-time/frontend
+          cp -r frontend/dist build/bin/vibe-time/frontend/
+          tar -czvf vibe-time-linux-amd64.tar.gz -C build/bin vibe-time
 
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v2
         with:
-          files: build/bin/${{ matrix.archive }}
+          files: |
+            build/bin/vibe-time-setup.exe
+            vibe-time-linux-amd64.tar.gz
