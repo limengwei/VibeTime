@@ -19,11 +19,23 @@ import (
 var trayIcon []byte
 
 func getAssetsDir() string {
-	exePath, err := os.Executable()
-	if err != nil {
-		panic("cannot determine executable path: " + err.Error())
+	candidates := []string{}
+
+	if exePath, err := os.Executable(); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(exePath), "frontend", "dist"))
 	}
-	return filepath.Join(filepath.Dir(exePath), "frontend", "dist")
+
+	if wd, err := os.Getwd(); err == nil {
+		candidates = append(candidates, filepath.Join(wd, "frontend", "dist"))
+	}
+
+	for _, dir := range candidates {
+		if stat, err := os.Stat(dir); err == nil && stat.IsDir() {
+			return dir
+		}
+	}
+
+	panic("frontend/dist not found in any candidate path")
 }
 
 func main() {
