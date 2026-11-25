@@ -195,11 +195,11 @@ func presetCard(a *app, p catalog.Preset) core.Node {
 	// Custom cards add edit and delete in the corners.
 	if !p.Builtin {
 		children = append(children,
-			cardAction(iconPencil, "编辑", core.Pt(6), func() {
+			cardAction(iconPencil, "编辑", core.Pt(0), func() {
 				a.editorID.Set(p.ID)
 				a.editorOpen.Set(true)
 			}),
-			cardAction(iconX, "删除", core.Pt(28), func() {
+			cardAction(iconX, "删除", core.Pt(18), func() {
 				if i := a.deps.Store.FindCustom(p.ID); i >= 0 {
 					a.deps.Store.Custom = append(a.deps.Store.Custom[:i], a.deps.Store.Custom[i+1:]...)
 					_ = a.deps.Store.Save()
@@ -256,7 +256,7 @@ func cardAction(svg *core.SVG, label string, right core.Length, onPress func()) 
 		NoFocus: true,
 		Label:   label,
 		Style: core.Style{
-			Position: core.Absolute, Top: core.Pt(6), Right: right,
+			Position: core.Absolute, Top: core.Pt(0), Right: right,
 			Width: core.Pt(20), Height: core.Pt(20), CornerRadius: 6,
 			AlignItems: core.AlignCenter, JustifyContent: core.JustifyCenter,
 		},
