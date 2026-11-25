@@ -236,7 +236,16 @@ func presetCard(a *app, p catalog.Preset) core.Node {
 			}
 			return base
 		},
-		Children: []core.Node{core.View{Class: "flex-col items-center gap-1", Children: children}},
+		Children: []core.Node{core.View{
+			Class: "flex-col items-center gap-1",
+			// Relative anchors the corner buttons' absolute placement to
+			// the card (a static ancestor would let them escape to a
+			// farther one); the full width bounds the description, so it
+			// wraps and its MaxLines ellipsizes instead of stretching the
+			// card with one long line.
+			Style:    core.Style{Width: core.Pct(100), Position: core.Relative},
+			Children: children,
+		}},
 	}
 }
 
@@ -328,7 +337,7 @@ func mixerCard(a *app, id string) core.Node {
 			core.Text{Content: emoji, Style: core.Style{FontSize: 22}},
 			core.Text{Content: sound.Label, MaxLines: 1, Style: core.Style{FontSize: 12, Color: core.RGBA(0xffffff, 0.7), TextAlign: core.TextAlignCenter}},
 			ui.Slider{
-				Min: 0.05, Max: 1, Step: 0.05,
+				Min: 0.05, Max: 1,
 				Value:    func() float64 { a.refresh.Get(); return a.activeVolumes[id] },
 				OnChange: func(v float64) { a.setSoundVolume(id, v) },
 				Style:    core.Style{Width: core.Pct(100)},
@@ -395,7 +404,7 @@ func footer(cx *core.Scope, a *app) core.Node {
 			core.View{Class: "flex-row items-center justify-end gap-2", Style: core.Style{FlexGrow: 1}, Children: []core.Node{
 				core.Icon{SVG: iconVolume, Style: core.Style{Width: core.Pt(16), Height: core.Pt(16), Color: core.RGBA(0xffffff, 0.4)}},
 				ui.Slider{
-					Min: 0, Max: 1, Step: 0.01,
+					Min: 0, Max: 1,
 					Value:    a.master.Get,
 					OnChange: func(v float64) { a.master.Set(v); a.deps.Engine.SetMaster(v) },
 					Style:    core.Style{Width: core.Pt(110)},

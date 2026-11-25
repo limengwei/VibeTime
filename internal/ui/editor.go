@@ -32,6 +32,10 @@ type editor struct {
 	order      []string
 	selRefresh *core.Signal[int]
 
+	// started tracks the previews this editor began, so closing it stops
+	// only those: the scene already playing when it opened keeps playing.
+	started map[string]bool
+
 	// editingID is the custom preset being edited, "" for a new one.
 	editingID string
 }
@@ -46,14 +50,15 @@ func presetEditor(cx *core.Scope, a *app) core.Node {
 		desc:       core.NewSignal(cx, ""),
 		selected:   map[string]float64{},
 		selRefresh: core.NewSignal(cx, 0),
+		started:    map[string]bool{},
 		editingID:  a.editorID.Get(),
 	}
 
-	// Opening the editor stops the current mix, as the web app did; editing
-	// preloads the preset and previews it. The work runs as an effect, after
-	// this build commits, so no signal is written while it renders.
+	// The mix playing when the editor opens keeps playing; picking sounds
+	// previews them alongside it. Editing preloads the preset. The work runs
+	// as an effect, after this build commits, so no signal is written while
+	// it renders.
 	cx.Effect(func() {
-		a.stopAll(false)
 		if e.editingID != "" {
 			if i := a.deps.Store.FindCustom(e.editingID); i >= 0 {
 				p := a.deps.Store.Custom[i]
@@ -191,7 +196,9 @@ func (e *editor) bumpSel() {
 	e.selRefresh.Set(e.selRefresh.GetUntracked() + 1)
 }
 
-// pick adds a sound (previewing it) at volume v.
+// pick adds a sound (previewing it) at volume v. A sound already playing —
+// one of the scene playing under the editor — is left as it is, so the
+// editor never disturbs that scene.
 func (e *editor) pick(id string, v float64) {
 	if _, ok := e.selected[id]; ok {
 		return
@@ -201,11 +208,15 @@ func (e *editor) pick(id string, v float64) {
 	}
 	e.selected[id] = v
 	e.order = append(e.order, id)
-	e.a.deps.Engine.Play(id, v)
+	if !e.a.deps.Engine.Playing(id) {
+		e.a.deps.Engine.Play(id, v)
+		e.started[id] = true
+	}
 	e.bumpSel()
 }
 
-// unpick removes a sound and stops its preview.
+// unpick removes a sound and stops its preview, unless the sound was
+// already playing when picked (it belongs to the scene under the editor).
 func (e *editor) unpick(id string) {
 	if _, ok := e.selected[id]; ok {
 		delete(e.selected, id)
@@ -215,7 +226,10 @@ func (e *editor) unpick(id string) {
 				break
 			}
 		}
-		e.a.deps.Engine.Stop(id)
+		if e.started[id] {
+			e.a.deps.Engine.Stop(id)
+			delete(e.started, id)
+		}
 		e.bumpSel()
 	}
 }
@@ -229,9 +243,12 @@ func (e *editor) toggle(id string) {
 	}
 }
 
-// close stops the previews and dismisses the dialog.
+// close stops the previews this editor started and dismisses the dialog;
+// the scene playing when it opened keeps playing.
 func (e *editor) close() {
-	e.a.stopAll(false)
+	for id := range e.started {
+		e.a.deps.Engine.Stop(id)
+	}
 	e.a.editorOpen.Set(false)
 }
 
@@ -301,7 +318,9 @@ func (e *editor) tag(id string) core.Node {
 		Children: []core.Node{
 			core.Text{Content: sound.Label, Style: core.Style{FontSize: 11, Color: core.RGBA(0xffffff, 0.7)}},
 			ui.Slider{
-				Min: 0.05, Max: 1, Step: 0.05,
+				// No Step: a stepped slider draws a dot per step under the
+				// track, which reads as a stray line of dots.
+				Min: 0.05, Max: 1,
 				Value: func() float64 { e.selRefresh.Get(); return e.selected[id] },
 				OnChange: func(v float64) {
 					e.selected[id] = v
