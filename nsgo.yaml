@@ -1,0 +1,20 @@
+# vibe-time 的 nsgo 工具配置（go tool nsgo dev / build 使用；
+# build 会临时生成资源 syso，产物在 dist/）。
+name: vibe-time
+id: com.vibetime.app
+version: 1.0.0
+copyright: © 2026 vibe-time
+appearance: dark
+
+# nsgo 只接受 PNG（内部经 image.Decode，不支持 .ico）；
+# 复用现有 build/appicon.png，build/windows/icon.ico 保留不引用。
+icon:
+  windows: build/appicon.png
+  png: build/appicon.png
+
+dev:
+  target: native
+
+build:
+  output: dist
+  targets: [windows_x64]

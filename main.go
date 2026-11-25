@@ -1,118 +1,121 @@
+// Command vibe-time is an ambient sound mixer: any number of looping sounds
+// under scene presets, with a focus timer over random wallpapers. It stays in
+// the tray when its window closes.
 package main
 
 import (
-	"context"
-	_ "embed"
+	"fmt"
 	"io/fs"
+	"net"
 	"os"
-	"os/signal"
-	"path/filepath"
-	"syscall"
+	"os/exec"
+	"strings"
+	"time"
 
-	"fyne.io/systray"
-	"github.com/wailsapp/wails/v2"
-	"github.com/wailsapp/wails/v2/pkg/options"
-	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
-	"github.com/wailsapp/wails/v2/pkg/runtime"
+	"github.com/nsgo-dev/nsgo"
+	"github.com/nsgo-dev/nsgo/core"
+	"github.com/nsgo-dev/nsgo/desktop"
+
+	"vibe-time/internal/audio"
+	"vibe-time/internal/catalog"
+	"vibe-time/internal/ui"
 )
 
-//go:embed build/windows/icon.ico
-var trayIcon []byte
+// singleInstanceAddr is the local lock that keeps one GUI instance: the
+// running process listens on it.
+const singleInstanceAddr = "127.0.0.1:9395"
 
-var assetsDir string
+// singletonLock holds the single-instance listener for the process's
+// lifetime: unreferenced, its os.File finalizer would close it and free the
+// port while the app keeps running.
+var singletonLock net.Listener
 
-func resolveAssetsDir() string {
-	candidates := []string{}
-
-	if exePath, err := os.Executable(); err == nil {
-		candidates = append(candidates, filepath.Join(filepath.Dir(exePath), "frontend", "dist"))
-	}
-
-	if wd, err := os.Getwd(); err == nil {
-		candidates = append(candidates, filepath.Join(wd, "frontend", "dist"))
-	}
-
-	for _, dir := range candidates {
-		if stat, err := os.Stat(dir); err == nil && stat.IsDir() {
-			return dir
+// acquireSingleInstance takes the single-instance lock. A previous instance
+// still holding it (hiding in the tray) is killed, so the newest launch
+// always wins and shows its own window.
+func acquireSingleInstance() {
+	ln, err := net.Listen("tcp", singleInstanceAddr)
+	if err != nil {
+		killPreviousInstance()
+		for i := 0; i < 30 && err != nil; i++ {
+			time.Sleep(100 * time.Millisecond)
+			ln, err = net.Listen("tcp", singleInstanceAddr)
+		}
+		if err != nil {
+			// A foreign program squats the port; run without the lock.
+			fmt.Fprintf(os.Stderr, "[单实例] %s 被其他程序占用，跳过单实例保护\n", singleInstanceAddr)
+			return
 		}
 	}
+	singletonLock = ln
+}
 
-	return ""
+// killPreviousInstance force-kills the process listening on the singleton
+// port — the previous GUI instance.
+func killPreviousInstance() {
+	out, err := exec.Command("netstat", "-ano", "-p", "tcp").Output()
+	if err != nil {
+		return
+	}
+	self := os.Getpid()
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.Contains(line, "LISTENING") || !strings.Contains(line, singleInstanceAddr) {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		pid := fields[len(fields)-1]
+		if pid == fmt.Sprint(self) {
+			continue
+		}
+		_ = exec.Command("taskkill", "/F", "/PID", pid).Run()
+	}
 }
 
 func main() {
-	app := NewApp()
-	assetsDir = resolveAssetsDir()
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	loop, _ := systray.RunWithExternalLoop(func() {
-		systray.SetIcon(trayIcon)
-		systray.SetTooltip("Vibe Time")
-		systray.SetOnTapped(func() {
-			app.ShowWindow()
+	// The lock lives for the process's lifetime; there is no in-app restart.
+	acquireSingleInstance()
+	nsgo.Run(func(app *core.Scope) {
+		win := desktop.OpenWindow(app, desktop.WindowOptions{
+			Title: "Vibe Time", Width: 900, Height: 680, Key: "main",
+		}, func(cx *core.Scope) core.Node {
+			cats := catalog.Load(audioFS())
+			store, err := catalog.OpenStore()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[预设] 读取失败，使用空白预设：%v\n", err)
+				store = &catalog.Store{}
+			}
+			engine := audio.NewEngine(cx, cats.Data)
+			walls := catalog.Wallpapers(wallpaperFS())
+			wallFS := wallpaperFS()
+			return ui.Main(cx, ui.Deps{
+				Catalog: cats, Store: store, Engine: engine,
+				Wallpapers: walls,
+				WallpaperData: func(file string) ([]byte, error) {
+					return fs.ReadFile(wallFS, file)
+				},
+			})
 		})
 
-		mShow := systray.AddMenuItem("显示窗口", "")
-		systray.AddSeparator()
-		mQuit := systray.AddMenuItem("退出", "")
-
-		go func() {
-			for {
-				select {
-				case <-mShow.ClickedCh:
-					app.ShowWindow()
-				case <-mQuit.ClickedCh:
-					systray.Quit()
+		// Closing the window hides it to the tray instead of quitting, so
+		// the sounds keep playing; the tray menu shows the window or quits.
+		win.OnClosing(app, func(c *core.WindowClosing) {
+			c.Cancel()
+			win.Hide()
+		})
+		desktop.NewTray(app, desktop.TrayOptions{
+			Icon:    trayIcon, // PNG; nsgo takes PNG only
+			Tooltip: "Vibe Time · 轻松找到你的宁静",
+			OnClick: win.Show,
+			Menu: func() []core.MenuItem {
+				return []core.MenuItem{
+					{Label: "显示窗口", OnSelect: win.Show},
+					{Separator: true},
+					{Label: "退出", OnSelect: app.Quit},
 				}
-			}
-		}()
-	}, func() {
-		os.Exit(0)
-	})
-
-	go loop()
-
-	go func() {
-		<-sigCh
-		os.Exit(0)
-	}()
-
-	var assetFS fs.FS
-	if assetsDir != "" {
-		assetFS = os.DirFS(assetsDir)
-	}
-
-	err := wails.Run(&options.App{
-		Title:     "Vibe Time",
-		Width:     900,
-		Height:    680,
-		MinWidth:  600,
-		MinHeight: 500,
-		Frameless: true,
-		AssetServer: &assetserver.Options{
-			Assets: assetFS,
-		},
-		BackgroundColour: &options.RGBA{R: 10, G: 14, B: 23, A: 255},
-		OnStartup:        app.startup,
-		OnBeforeClose: func(ctx context.Context) bool {
-			runtime.WindowHide(ctx)
-			return true
-		},
-		SingleInstanceLock: &options.SingleInstanceLock{
-			UniqueId: "vibe-time-a3f8c9d2-e7b1-4d6a-b5c3-9e8f2a1d0c7b",
-			OnSecondInstanceLaunch: func(secondInstanceData options.SecondInstanceData) {
-				app.ShowWindow()
 			},
-		},
-		Bind: []interface{}{
-			app,
-		},
-	})
-
-	if err != nil {
-		println("Error:", err.Error())
-	}
+		})
+	}, nsgo.Appearance(core.AppearanceDark))
 }
