@@ -63,6 +63,7 @@ func Main(cx *core.Scope, deps Deps) core.Node {
 		Style: appBackground,
 		Children: []core.Node{
 			header(),
+			repoCorner(cx),
 			core.Scroll{
 				Class: "flex-1 min-h-0",
 				Style: core.Style{Padding: core.Symmetric(4, 32), Gap: 16},
@@ -102,6 +103,28 @@ func header() core.Node {
 func (a *app) presets() []catalog.Preset {
 	all := append(catalog.BuiltinPresets(), a.deps.Store.Custom...)
 	return all
+}
+
+// repoURL is the project's GitHub repository, opened in the system browser.
+const repoURL = "https://github.com/limengwei/VibeTime"
+
+// repoCorner is the GitHub repository entry pinned at the window's
+// top-right corner, out of the flow of the centered header.
+func repoCorner(cx *core.Scope) core.Node {
+	return ui.Press{
+		OnPress: func() { cx.OpenURL(repoURL, nil) },
+		Label:   "GitHub 仓库",
+		Style: core.Style{
+			Position: core.Fixed, Top: core.Pt(8), Right: core.Pt(8),
+			Width:  core.Pt(30),
+			Height: core.Pt(30), CornerRadius: 8,
+			AlignItems: core.AlignCenter, JustifyContent: core.JustifyCenter,
+		},
+		StyleFunc: func() core.Style {
+			return core.Style{Hover: &core.Style{Background: core.RGBA(0xffffff, 0.08)}}
+		},
+		Children: []core.Node{core.Icon{SVG: iconGitHub, Style: core.Style{Width: core.Pt(16), Height: core.Pt(16), Color: core.RGBA(0xffffff, 0.35)}}},
+	}
 }
 
 // applyPreset stops everything and loops the preset's sounds at their
