@@ -2,7 +2,7 @@
 # build 会临时生成资源 syso，产物在 dist/）。
 name: vibe-time
 id: limengwei.mindspace.vibetime
-version: 2.1.1
+version: 2.1.2
 copyright: © 2026 vibe-time
 appearance: dark
 
