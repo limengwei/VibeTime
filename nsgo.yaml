@@ -6,11 +6,10 @@ version: 1.0.0
 copyright: © 2026 vibe-time
 appearance: dark
 
-# nsgo 只接受 PNG（内部经 image.Decode，不支持 .ico）；
-# 复用现有 build/appicon.png，build/windows/icon.ico 保留不引用。
+# nsgo 只接受 PNG（内部经 image.Decode，不支持 .ico）。
 icon:
-  windows: build/appicon.png
-  png: build/appicon.png
+  windows: assets/appicon.png
+  png: assets/appicon.png
 
 dev:
   target: native

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="build/appicon.png" width="128" />
+  <img src="assets/appicon.png" width="128" />
 </p>
 
 <h1 align="center">Vibe Time</h1>
@@ -23,7 +23,7 @@
 
 ## 功能特性
 
-- **100+ 高品质环境音** — 覆盖 9 大分类：动物、自然、雨声、噪音、场所、物品、交通、城市、双耳节拍
+- **89 个高品质环境音** — 覆盖 9 大分类：动物、自然、雨声、噪音、场所、物品、交通、城市、双耳节拍
 - **场景预设** — 内置「雨夜」「深度专注」「森林清晨」等多个一键场景，也支持自定义预设
 - **专注模式** — 全屏沉浸体验，支持倒计时（5/10/20/30/60 分钟）和精美壁纸背景
 - **独立音量控制** — 每个音效可单独调节音量，全局主音量控制
@@ -34,63 +34,47 @@
 
 | 层 | 技术 |
 |---|---|
-| 后端 | Go 1.23 + [Wails v2](https://wails.io/) |
-| 前端 | Vue 3 + Vite |
-| 系统托盘 | [fyne.io/systray](https://github.com/fyne-io/systray) |
-| 音频引擎 | Web Audio API（浏览器原生） |
+| UI 框架 | Go 1.27 + [nsgo](https://github.com/nsgo-dev/nsgo)（纯 Go 原生渲染） |
+| 音频引擎 | nsgo audio.Player（多音轨循环混音） |
+| 界面图标 | [Lucide](https://lucide.dev)（ISC，经 icons MCP 获取） |
+| 资源打包 | go:embed（音效/壁纸全部内嵌，单文件约 135MB） |
 
 ## 项目结构
 
 ```
 vibe-time/
-├── app.go                          # Go 后端：音效/壁纸列表、窗口控制
-├── main.go                         # 应用入口：Wails 配置、系统托盘
-├── wails.json                      # Wails 项目配置
-├── frontend/
-│   ├── src/
-│   │   ├── App.vue                 # 主界面：音效面板、全局控制
-│   │   ├── components/
-│   │   │   ├── FocusMode.vue       # 专注模式（全屏+计时+壁纸）
-│   │   │   ├── ScenePresets.vue    # 场景预设选择器
-│   │   │   └── SoundCard.vue       # 单个音效卡片
-│   │   └── audio/
-│   │       ├── audioEngine.js      # Web Audio 音频引擎
-│   │       └── soundIcons.js       # 音效分类图标
-│   └── public/
-│       ├── audio/                  # 音效资源（MP3/WAV）
-│       └── wallpapers/             # 专注模式壁纸
-└── build/                          # 构建资源（图标、清单等）
+├── main.go                         # 入口：nsgo 窗口、托盘、单实例
+├── assets.go                       # go:embed 内嵌音效/壁纸/图标
+├── nsgo.yaml                       # nsgo 工具配置（构建/图标）
+├── assets/
+│   ├── audio/                      # 音效资源（MP3/WAV，89 个）
+│   ├── wallpapers/                 # 专注模式壁纸
+│   └── appicon.png                 # 应用/托盘图标
+└── internal/
+    ├── catalog/                    # 音效目录、场景预设、配方码、持久化
+    ├── audio/                      # 多音轨循环播放引擎
+    └── ui/                         # nsgo 界面：场景/混音/编辑器/专注模式
 ```
 
 ## 开发
 
 ### 前置要求
 
-- [Go](https://go.dev/dl/) 1.23+
-- [Node.js](https://nodejs.org/) 16+
-- [Wails CLI](https://wails.io/docs/gettingstarted/installation) v2
+- [Go](https://go.dev/dl/) 1.27+（GOTOOLCHAIN=auto 会自动切换）
+- 无需 Node.js 与前端工具链
 
-### 安装 Wails CLI
-
-```bash
-go install github.com/wailsapp/wails/v2/cmd/wails@latest
-```
-
-### 开发模式
+### 构建与测试
 
 ```bash
-wails dev
+go build -trimpath -ldflags "-s -w" -o dist/vibe-time.exe .
+go test ./...
 ```
 
-启动后自带 Vite 热更新，前端修改即时生效。同时会在 `http://localhost:34115` 启动开发服务器，可在浏览器中调试 Go 方法调用。
-
-### 构建
+带 exe/窗口图标的发布构建（读 `nsgo.yaml` 生成资源）：
 
 ```bash
-wails build
+go tool nsgo build
 ```
-
-生成的可执行文件位于 `build/bin/` 目录下。
 
 ## 音效分类
 

@@ -9,7 +9,7 @@ import (
 // realAudio points the tests at the shipped sound library.
 func realAudio(t *testing.T) *Catalog {
 	t.Helper()
-	dir := filepath.Join("..", "..", "frontend", "public", "audio")
+	dir := filepath.Join("..", "..", "assets", "audio")
 	if _, err := os.Stat(dir); err != nil {
 		t.Skipf("sound library not present: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestStoreCorruptFileStartsFresh(t *testing.T) {
 }
 
 func TestWallpapers(t *testing.T) {
-	dir := filepath.Join("..", "..", "frontend", "public", "wallpapers")
+	dir := filepath.Join("..", "..", "assets", "wallpapers")
 	if _, err := os.Stat(dir); err != nil {
 		t.Skipf("wallpapers not present: %v", err)
 	}

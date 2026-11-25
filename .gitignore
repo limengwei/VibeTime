@@ -1,6 +1,3 @@
-build/bin
-node_modules
-frontend/dist
 dist/
 
 # Beads / Dolt files (added by bd init)
@@ -11,4 +8,3 @@ dist/
 /.claude
 CLAUDE.md
 AGENTS.md
-/*.exe
