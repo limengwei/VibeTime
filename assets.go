@@ -1,5 +1,7 @@
-// Package main embeds vibe-time's shipped assets: the ambient sound library,
-// the focus-mode wallpapers and the tray icon (PNG; nsgo takes PNG only).
+// Package main embeds vibe-time's shipped assets: the focus-mode
+// wallpapers and the tray icon (PNG; nsgo takes PNG only). The sound
+// library is not shipped — it downloads from the vibe-time-sound
+// repository at runtime.
 package main
 
 import (
@@ -7,20 +9,8 @@ import (
 	"io/fs"
 )
 
-//go:embed all:assets/audio
-var audioAssets embed.FS
-
 //go:embed all:assets/wallpapers
 var wallpaperAssets embed.FS
-
-// audioFS is the sound library rooted at the audio/ directory.
-func audioFS() fs.FS {
-	sub, err := fs.Sub(audioAssets, "assets/audio")
-	if err != nil {
-		panic(err) // the embedded tree is fixed at build time
-	}
-	return sub
-}
 
 // wallpaperFS is the wallpaper set rooted at the wallpapers/ directory.
 func wallpaperFS() fs.FS {

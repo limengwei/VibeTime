@@ -6,12 +6,14 @@ package ui
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/nsgo-dev/nsgo/core"
 	"github.com/nsgo-dev/nsgo/ui"
 
 	"vibe-time/internal/audio"
 	"vibe-time/internal/catalog"
+	"vibe-time/internal/pack"
 )
 
 // Deps carries what the UI needs from main.
@@ -22,6 +24,9 @@ type Deps struct {
 	Wallpapers []catalog.Wallpaper
 	// WallpaperData reads one wallpaper file's bytes.
 	WallpaperData func(file string) ([]byte, error)
+	// Pack downloads the sounds that ship in the separate pack repository;
+	// nil keeps the app to its embedded sounds.
+	Pack *pack.Pack
 }
 
 // app is the main view's mutable state plus its handlers. It lives on the
@@ -56,6 +61,28 @@ func Main(cx *core.Scope, deps Deps) core.Node {
 		editorID:      core.NewSignal(cx, ""),
 		master:        core.NewSignal(cx, 0.8),
 		activeVolumes: map[string]float64{},
+	}
+
+	// The sound pack runs in the background: its manifest fills the
+	// (otherwise empty) catalog with every sound the repository lists —
+	// labels and category names from its labels.json — then the cache
+	// fills quietly. The app is fully usable before any of it.
+	if deps.Pack != nil {
+		deps.Pack.Start(func(m *pack.Manifest) {
+			for _, f := range m.Files {
+				if _, ok := a.deps.Catalog.Sound(f.ID); !ok {
+					s := catalog.SoundFromID(f.ID)
+					if _, base, _ := strings.Cut(f.ID, "/"); m.Labels[base] != "" {
+						s.Label = m.Labels[base]
+					}
+					a.deps.Catalog.AddSound(s)
+				}
+			}
+			for id, cm := range m.Categories {
+				a.deps.Catalog.SetCategoryMeta(id, cm.Title, cm.Emoji)
+			}
+			a.bumpRefresh()
+		})
 	}
 
 	return core.View{
@@ -128,7 +155,8 @@ func repoCorner(cx *core.Scope) core.Node {
 }
 
 // applyPreset stops everything and loops the preset's sounds at their
-// (possibly overridden) volumes.
+// (possibly overridden) volumes. A sound still downloading starts as
+// soon as its download lands, if the preset is still applied.
 func (a *app) applyPreset(p catalog.Preset) {
 	if a.activeID == p.ID {
 		return
@@ -145,12 +173,32 @@ func (a *app) applyPreset(p catalog.Preset) {
 		if ov, ok := a.deps.Store.Override(p.ID, id); ok {
 			v = ov
 		}
-		a.deps.Engine.Play(id, v)
+		if a.soundReady(id) {
+			a.deps.Engine.Play(id, v)
+		} else if a.deps.Pack != nil {
+			id, v := id, v
+			a.deps.Pack.Ensure(id, func(ok bool) {
+				if ok && a.activeID == p.ID {
+					a.deps.Engine.Play(id, v)
+					a.bumpRefresh()
+				}
+			})
+		}
 		order = append(order, id)
 		vols[id] = v
 	}
 	a.activeID, a.activePreset, a.activeOrder, a.activeVolumes = p.ID, p, order, vols
 	a.bumpRefresh()
+}
+
+// soundReady reports whether a sound's bytes are at hand: downloaded to
+// the pack cache or shipped in the embedded library.
+func (a *app) soundReady(id string) bool {
+	if a.deps.Pack != nil && a.deps.Pack.Cached(id) {
+		return true
+	}
+	s, ok := a.deps.Catalog.Sound(id)
+	return ok && s.File != ""
 }
 
 // bumpRefresh re-renders what follows plain state. It reads untracked so a

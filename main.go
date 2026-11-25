@@ -18,6 +18,7 @@ import (
 
 	"vibe-time/internal/audio"
 	"vibe-time/internal/catalog"
+	"vibe-time/internal/pack"
 	"vibe-time/internal/ui"
 )
 
@@ -79,19 +80,33 @@ func main() {
 	acquireSingleInstance()
 	nsgo.Run(func(app *core.Scope) {
 		win := desktop.OpenWindow(app, desktop.WindowOptions{
-			Title: "Vibe Time", Width: 900, Height: 680, Key: "main",
+			Title: "Vibe Time", Width: 1014, Height: 755, Key: "main",
 		}, func(cx *core.Scope) core.Node {
-			cats := catalog.Load(audioFS())
+			// The catalog starts empty: every sound lives in the separate
+			// vibe-time-sound repository and arrives through the pack.
+			cats := catalog.Empty()
 			store, err := catalog.OpenStore()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "[预设] 读取失败，使用空白预设：%v\n", err)
 				store = &catalog.Store{}
 			}
-			engine := audio.NewEngine(cx, cats.Data)
+			pk, err := pack.Open(cx)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[声音包] 缓存目录不可用，无法下载声音：%v\n", err)
+				pk = nil
+			}
+			var engine *audio.Engine
+			if pk != nil {
+				engine = audio.NewEngine(cx, pk.Read)
+			} else {
+				engine = audio.NewEngine(cx, func(string) ([]byte, error) {
+					return nil, fs.ErrNotExist
+				})
+			}
 			walls := catalog.Wallpapers(wallpaperFS())
 			wallFS := wallpaperFS()
 			return ui.Main(cx, ui.Deps{
-				Catalog: cats, Store: store, Engine: engine,
+				Catalog: cats, Store: store, Engine: engine, Pack: pk,
 				Wallpapers: walls,
 				WallpaperData: func(file string) ([]byte, error) {
 					return fs.ReadFile(wallFS, file)

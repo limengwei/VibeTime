@@ -155,6 +155,32 @@ func LabelOf(base string) string {
 	return strings.TrimSpace(repl.Replace(base))
 }
 
+// CategoryMeta names a sound category, as the sound pack's labels.json
+// carries it.
+type CategoryMeta struct {
+	Title string `json:"title"`
+	Emoji string `json:"emoji"`
+}
+
+// SeedLabels returns the shipped Chinese sound labels, for seeding the
+// sound pack repository's labels.json.
+func SeedLabels() map[string]string {
+	out := make(map[string]string, len(soundLabels))
+	for k, v := range soundLabels {
+		out[k] = v
+	}
+	return out
+}
+
+// SeedCategories returns the shipped category metadata, likewise.
+func SeedCategories() map[string]CategoryMeta {
+	out := make(map[string]CategoryMeta, len(categoryMetaByID))
+	for k, v := range categoryMetaByID {
+		out[k] = CategoryMeta{Title: v.title, Emoji: v.emoji}
+	}
+	return out
+}
+
 func categoryTitle(id string) string {
 	if m, ok := categoryMetaByID[id]; ok {
 		return m.title
@@ -223,6 +249,66 @@ func Load(audio fs.FS) *Catalog {
 func (c *Catalog) Sound(id string) (Sound, bool) {
 	s, ok := c.byID[id]
 	return s, ok
+}
+
+// SoundFromID derives a sound from a pack manifest ID ("category/base"),
+// where its label and category metadata follow the naming conventions.
+func SoundFromID(id string) Sound {
+	cat, base, _ := strings.Cut(id, "/")
+	return Sound{ID: id, Label: LabelOf(base), Category: cat}
+}
+
+// AddSound merges a runtime-discovered sound (the downloaded pack's
+// manifest), adding its category when new and keeping both sorts.
+func (c *Catalog) AddSound(s Sound) {
+	if s.ID == "" {
+		return
+	}
+	if _, ok := c.byID[s.ID]; ok {
+		return
+	}
+	c.byID[s.ID] = s
+	for i := range c.Cats {
+		if c.Cats[i].ID == s.Category {
+			c.Cats[i].Sounds = append(c.Cats[i].Sounds, s)
+			sort.Slice(c.Cats[i].Sounds, func(a, b int) bool {
+				return c.Cats[i].Sounds[a].Label < c.Cats[i].Sounds[b].Label
+			})
+			return
+		}
+	}
+	c.Cats = append(c.Cats, Category{
+		ID: s.Category, Title: categoryTitle(s.Category), Emoji: categoryEmoji(s.Category),
+		Sounds: []Sound{s},
+	})
+	sort.Slice(c.Cats, func(a, b int) bool { return c.Cats[a].Title < c.Cats[b].Title })
+}
+
+// SetCategoryMeta renames a category (and its emoji), re-sorting the list;
+// unknown IDs are ignored. The sound pack's labels.json drives it.
+func (c *Catalog) SetCategoryMeta(id, title, emoji string) {
+	if title == "" && emoji == "" {
+		return
+	}
+	for i := range c.Cats {
+		if c.Cats[i].ID != id {
+			continue
+		}
+		if title != "" {
+			c.Cats[i].Title = title
+		}
+		if emoji != "" {
+			c.Cats[i].Emoji = emoji
+		}
+		sort.Slice(c.Cats, func(a, b int) bool { return c.Cats[a].Title < c.Cats[b].Title })
+		return
+	}
+}
+
+// Empty is a catalog with nothing in it: the app starts here, and the
+// downloaded sound pack's manifest fills it in.
+func Empty() *Catalog {
+	return &Catalog{byID: map[string]Sound{}}
 }
 
 // Data reads a sound's bytes by ID for playback.

@@ -32,9 +32,15 @@ type editor struct {
 	order      []string
 	selRefresh *core.Signal[int]
 
+	// fetching tracks sounds still downloading; their tags show it until
+	// the download lands and the preview starts.
+	fetching map[string]bool
+
 	// saved marks a save() already under way: closing then must not stop
 	// what applyPreset started, whenever the dialog's close callback runs.
-	saved bool
+	// closed marks the dialog gone, so a download landing after it never
+	// starts a preview.
+	saved, closed bool
 
 	// editingID is the custom preset being edited, "" for a new one.
 	editingID string
@@ -49,6 +55,7 @@ func presetEditor(cx *core.Scope, a *app) core.Node {
 		icon:       core.NewSignal(cx, randomIcons[0]),
 		desc:       core.NewSignal(cx, ""),
 		selected:   map[string]float64{},
+		fetching:   map[string]bool{},
 		selRefresh: core.NewSignal(cx, 0),
 		editingID:  a.editorID.Get(),
 	}
@@ -155,8 +162,14 @@ func presetEditor(cx *core.Scope, a *app) core.Node {
 						}},
 					}},
 
-					// Every sound as chips, grouped by category.
-					core.View{Class: "flex-col gap-3", Children: e.categoryGroups()},
+					// Every sound as chips, grouped by category. A Dynamic:
+					// the catalog fills from the sound pack's manifest
+					// whenever it lands, and an editor opened before that
+					// must fill in too.
+					core.Dynamic(func(cx *core.Scope) core.Node {
+						e.a.refresh.Get()
+						return core.View{Class: "flex-col gap-3", Children: e.categoryGroups()}
+					}),
 				},
 			},
 		},
@@ -196,7 +209,9 @@ func (e *editor) bumpSel() {
 	e.selRefresh.Set(e.selRefresh.GetUntracked() + 1)
 }
 
-// pick adds a sound (previewing it) at volume v.
+// pick adds a sound (previewing it) at volume v. A sound still on the
+// pack server shows as downloading and starts previewing once it lands;
+// a failed download un-picks it.
 func (e *editor) pick(id string, v float64) {
 	if _, ok := e.selected[id]; ok {
 		return
@@ -206,8 +221,37 @@ func (e *editor) pick(id string, v float64) {
 	}
 	e.selected[id] = v
 	e.order = append(e.order, id)
-	e.a.deps.Engine.Play(id, v)
+	e.preview(id)
 	e.bumpSel()
+}
+
+// preview starts a sound playing, downloading it first when needed.
+func (e *editor) preview(id string) {
+	a := e.a
+	if a.deps.Engine.Playing(id) {
+		return
+	}
+	if a.soundReady(id) {
+		a.deps.Engine.Play(id, e.selected[id])
+		return
+	}
+	if a.deps.Pack == nil {
+		return
+	}
+	e.fetching[id] = true
+	a.deps.Pack.Ensure(id, func(ok bool) {
+		delete(e.fetching, id)
+		if !ok {
+			if _, still := e.selected[id]; still {
+				e.unpick(id)
+			}
+			return
+		}
+		if !e.closed && !e.saved {
+			a.deps.Engine.Play(id, e.selected[id])
+		}
+		e.bumpSel()
+	})
 }
 
 // unpick removes a sound and stops its preview.
@@ -236,8 +280,10 @@ func (e *editor) toggle(id string) {
 
 // close stops the previews and dismisses the dialog. A save() already
 // under way applied its preset, so only a plain close (cancel, Esc, the
-// backdrop) stops the previews.
+// backdrop) stops the previews; either way a download landing afterwards
+// never starts one.
 func (e *editor) close() {
+	e.closed = true
 	if !e.saved {
 		e.a.deps.Engine.StopAll()
 	}
@@ -298,20 +344,28 @@ func (e *editor) save() {
 	// Mark saved before the dialog closes, so the close that follows never
 	// stops the preset applyPreset is about to play.
 	e.saved = true
+	e.closed = true
 	e.a.editorOpen.Set(false)
 	// Apply fresh: applyPreset skips a repeated ID, so clear it first.
 	e.a.activeID = ""
 	e.a.applyPreset(p)
 }
 
-// tag renders one chosen sound with its volume slider and remove button.
+// tag renders one chosen sound with its volume slider and remove button;
+// a sound still downloading says so until its preview starts.
 func (e *editor) tag(id string) core.Node {
 	sound, _ := e.a.deps.Catalog.Sound(id)
 	return core.View{
 		Class: "flex-row items-center gap-1.5 px-2 py-1 rounded-lg",
 		Style: core.Style{Background: core.RGBA(0xffffff, 0.08)},
 		Children: []core.Node{
-			core.Text{Content: sound.Label, Style: core.Style{FontSize: 11, Color: core.RGBA(0xffffff, 0.7)}},
+			core.Text{ContentFunc: func() string {
+				e.selRefresh.Get()
+				if e.fetching[id] {
+					return sound.Label + " 下载中…"
+				}
+				return sound.Label
+			}, Style: core.Style{FontSize: 11, Color: core.RGBA(0xffffff, 0.7)}},
 			ui.Slider{
 				// No Step: a stepped slider draws a dot per step under the
 				// track, which reads as a stray line of dots.
