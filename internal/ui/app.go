@@ -65,6 +65,7 @@ func Main(cx *core.Scope, deps Deps) core.Node {
 		master:        core.NewSignal(cx, 0.8),
 		welcomeOpen:   core.NewSignal(cx, false),
 		packReady:     core.NewSignal(cx, false),
+		packFailed:    core.NewSignal(cx, false),
 		activeVolumes: map[string]float64{},
 	}
 
