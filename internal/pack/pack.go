@@ -60,27 +60,27 @@ func defaultSources() []source {
 			return out
 		}
 	}
+	// Mirror availability swings by region and by the day, so fetch races
+	// every source at once (see fetch) and the list carries them all:
+	// whichever answers first wins. Archives only ride on sources whose
+	// URL shape is known to serve them; gitee's archive endpoint sits
+	// behind risk-control captcha pages and stays off.
+	const repo = "limengwei/vibe-time-sound"
+	raw := "https://raw.githubusercontent.com/" + repo + "/master"
+	zip := "https://github.com/" + repo + "/archive/refs/heads/master.zip"
+	mirror := func(base string) source {
+		return source{raw: base + "/" + raw, archive: base + "/" + zip}
+	}
 	return []source{
-		// Mirror-accelerated GitHub first (reachable from mainland China
-		// without a proxy); the mirrors are community-run and do fall over,
-		// so direct GitHub follows, then gitee's raw endpoint as the last
-		// resort — its archive endpoint sits behind risk-control captcha
-		// pages and is deliberately left out.
-		{
-			raw:     "https://ghfast.top/https://raw.githubusercontent.com/limengwei/vibe-time-sound/master",
-			archive: "https://ghfast.top/https://github.com/limengwei/vibe-time-sound/archive/refs/heads/master.zip",
-		},
-		{
-			raw:     "https://gh-proxy.com/https://raw.githubusercontent.com/limengwei/vibe-time-sound/master",
-			archive: "https://gh-proxy.com/https://github.com/limengwei/vibe-time-sound/archive/refs/heads/master.zip",
-		},
-		{
-			raw:     "https://raw.githubusercontent.com/limengwei/vibe-time-sound/master",
-			archive: "https://codeload.github.com/limengwei/vibe-time-sound/zip/refs/heads/master",
-		},
-		{
-			raw: "https://gitee.com/limengwe/vibe-time-sound/raw/master",
-		},
+		mirror("https://gh-proxy.com"),
+		mirror("https://ghfast.top"),
+		mirror("https://ghproxy.net"),
+		mirror("https://github.akams.cn"),
+		mirror("https://gh.llkk.cc"),
+		mirror("https://hub.gitmirror.com"),
+		mirror("https://ghproxy.homeboyc.cn"),
+		{raw: raw, archive: "https://codeload.github.com/" + repo + "/zip/refs/heads/master"},
+		{raw: "https://gitee.com/limengwe/vibe-time-sound/raw/master"},
 	}
 }
 
@@ -350,45 +350,30 @@ func (p *Pack) pathOfLocked(id string) string {
 	return filepath.Join(p.dir, filepath.FromSlash(f.Path))
 }
 
-// fetchManifest pulls manifest.json — and labels.json when it answers —
-// from the first source that serves them.
+// fetchManifest pulls manifest.json — and labels.json when it answers.
+// fetch races every source, so one round is enough.
 func (p *Pack) fetchManifest(ctx context.Context) (*Manifest, error) {
-	var lastErr error
-	for _, src := range Sources {
-		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		data, err := p.fetch(cctx, "manifest.json")
-		if err != nil {
-			cancel()
-			lastErr = err
-			continue
-		}
-		var m Manifest
-		if err := json.Unmarshal(data, &m); err != nil {
-			cancel()
-			lastErr = fmt.Errorf("%s: %w", src.raw, err)
-			continue
-		}
-		if len(m.Files) == 0 {
-			cancel()
-			lastErr = fmt.Errorf("%s: empty manifest", src.raw)
-			continue
-		}
-		if ldata, err := p.fetch(cctx, "labels.json"); err == nil {
-			var lf struct {
-				Categories map[string]catalog.CategoryMeta `json:"categories"`
-				Labels     map[string]string               `json:"labels"`
-			}
-			if err := json.Unmarshal(ldata, &lf); err == nil {
-				m.Categories, m.Labels = lf.Categories, lf.Labels
-			}
-		}
-		cancel()
-		return &m, nil
+	data, err := p.fetch(ctx, "manifest.json")
+	if err != nil {
+		return nil, err
 	}
-	if lastErr == nil {
-		lastErr = errors.New("pack: no sources")
+	var m Manifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, fmt.Errorf("manifest: %w", err)
 	}
-	return nil, lastErr
+	if len(m.Files) == 0 {
+		return nil, errors.New("manifest: no files")
+	}
+	if ldata, err := p.fetch(ctx, "labels.json"); err == nil {
+		var lf struct {
+			Categories map[string]catalog.CategoryMeta `json:"categories"`
+			Labels     map[string]string               `json:"labels"`
+		}
+		if err := json.Unmarshal(ldata, &lf); err == nil {
+			m.Categories, m.Labels = lf.Categories, lf.Labels
+		}
+	}
+	return &m, nil
 }
 
 // prefetch quietly fills the cache. A cold start (nothing cached) takes
@@ -549,31 +534,55 @@ func (p *Pack) fetchArchiveFrom(ctx context.Context, url string, m *Manifest, on
 	return nil
 }
 
-// fetch GETs rel (relative to a source) from the first source that
-// answers, returning its bytes.
+// fetch GETs rel (relative to every source) and races them: the first
+// healthy answer wins, and cancelling the context it returns with stops
+// the stragglers. A response that is not a 200, or is an HTML page (a
+// mirror's error or risk-control answer), loses its heat.
 func (p *Pack) fetch(ctx context.Context, rel string) ([]byte, error) {
-	var lastErr error
+	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	type result struct {
+		data []byte
+		err  error
+	}
+	ch := make(chan result, len(Sources))
 	for _, src := range Sources {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(src.raw, "/")+"/"+rel, nil)
-		if err != nil {
-			return nil, err
+		go func(raw string) {
+			req, err := http.NewRequestWithContext(cctx, http.MethodGet, strings.TrimRight(raw, "/")+"/"+rel, nil)
+			if err != nil {
+				ch <- result{nil, err}
+				return
+			}
+			resp, err := p.client().Do(req)
+			if err != nil {
+				ch <- result{nil, err}
+				return
+			}
+			data, err := io.ReadAll(resp.Body)
+			ct := resp.Header.Get("Content-Type")
+			code := resp.StatusCode
+			resp.Body.Close()
+			switch {
+			case err != nil:
+				ch <- result{nil, err}
+			case code != http.StatusOK:
+				ch <- result{nil, fmt.Errorf("%s: HTTP %d", raw, code)}
+			case strings.Contains(ct, "text/html"):
+				ch <- result{nil, fmt.Errorf("%s: HTML answer, not a file", raw)}
+			default:
+				ch <- result{data, nil}
+			}
+		}(src.raw)
+	}
+	var lastErr error = errors.New("pack: no source answered")
+	for range Sources {
+		if r := <-ch; r.err == nil {
+			// Returning cancels the context, closing the losing requests.
+			return r.data, nil
+		} else if r.err != context.Canceled {
+			lastErr = r.err
 		}
-		resp, err := p.client().Do(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		data, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if resp.StatusCode != http.StatusOK {
-			lastErr = fmt.Errorf("%s: HTTP %d", src.raw, resp.StatusCode)
-			continue
-		}
-		return data, nil
 	}
 	return nil, lastErr
 }
