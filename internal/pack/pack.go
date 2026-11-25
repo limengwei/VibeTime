@@ -99,8 +99,8 @@ type Manifest struct {
 	// Labels and Categories come from the repository's labels.json (fetched
 	// alongside the manifest, cached with it): base name → Chinese label,
 	// category ID → title and emoji. Both may be empty when it is missing.
-	Labels     map[string]string                  `json:"labels,omitempty"`
-	Categories map[string]catalog.CategoryMeta    `json:"categories,omitempty"`
+	Labels     map[string]string               `json:"labels,omitempty"`
+	Categories map[string]catalog.CategoryMeta `json:"categories,omitempty"`
 }
 
 // ByID returns the manifest entry for a sound ID.
@@ -146,8 +146,9 @@ func Open(cx *core.Scope) (*Pack, error) {
 
 // Start fetches the manifest (falling back to the cached copy offline),
 // reports it on the app's goroutine, prunes files the pack dropped, then
-// prefetches whatever is missing in the background.
-func (p *Pack) Start(onManifest func(*Manifest)) {
+// prefetches whatever is missing in the background — unless prefetch is
+// false, when the welcome page's Download owns the first fill instead.
+func (p *Pack) Start(onManifest func(*Manifest), prefetch bool) {
 	go func() {
 		ctx := p.cx.Context()
 		m, err := p.fetchManifest(ctx)
@@ -171,9 +172,90 @@ func (p *Pack) Start(onManifest func(*Manifest)) {
 		}
 		mm := m
 		p.cx.Post(func() { onManifest(mm) })
-		p.prefetch(ctx, m)
+		if prefetch {
+			p.prefetch(ctx, m)
+		}
 	}()
 }
+
+// Download fetches the whole pack now and blocks until every file of the
+// current manifest is on disk. Progress reports a phase — "下载" (the
+// archive's bytes), "入库" (files verified and stored out of the archive),
+// "补齐" (files fetched one by one, the count) — each with a done/total
+// pair; total may be 0 while unknown. The welcome page calls it from a
+// plain goroutine — onProgress runs there too.
+func (p *Pack) Download(ctx context.Context, onProgress func(phase string, done, total int64)) error {
+	p.mu.Lock()
+	m := p.man
+	p.mu.Unlock()
+	if m == nil {
+		return errors.New("pack: manifest 未知，无法下载")
+	}
+	missing := 0
+	for _, f := range m.Files {
+		if !p.Cached(f.ID) {
+			missing++
+		}
+	}
+	if missing == 0 {
+		return nil
+	}
+	// The whole-repository zip covers everything in one request; failures
+	// fall through to the per-file loop below. Chunked transfers carry no
+	// Content-Length, but the pack's files are already compressed, so the
+	// manifest's total stands in for the archive's size.
+	var totalBytes int64
+	for _, f := range m.Files {
+		totalBytes += f.Size
+	}
+	onProgress("下载", 0, 0)
+	if err := p.fetchArchive(ctx, m,
+		func(done, total int64) {
+			if total <= 0 {
+				total = totalBytes
+			}
+			onProgress("下载", done, total)
+		},
+		func(done, total int) { onProgress("入库", int64(done), int64(total)) },
+	); err != nil {
+		log.Printf("[pack] 整库 zip 失败，改为逐个文件: %v", err)
+	}
+	left := 0
+	for i, f := range m.Files {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if p.Cached(f.ID) {
+			continue
+		}
+		onProgress("补齐", int64(i+1), int64(len(m.Files)))
+		if err := p.download(ctx, f); err != nil {
+			log.Printf("[pack] 下载 %s 失败: %v", f.ID, err)
+			left++
+		}
+	}
+	if left > 0 {
+		return fmt.Errorf("%d 个文件下载失败，请重试", left)
+	}
+	return nil
+}
+
+// CachedCount reports how many of the current manifest's files are on
+// disk (0 with no manifest — a fresh install).
+func (p *Pack) CachedCount() int {
+	p.mu.Lock()
+	m := p.man
+	p.mu.Unlock()
+	if m == nil {
+		return 0
+	}
+	return p.cachedCount(m)
+}
+
+// Dir is the pack's cache directory, for display.
+func (p *Pack) Dir() string { return p.dir }
 
 // Cached reports whether a sound's bytes are on disk.
 func (p *Pack) Cached(id string) bool {
@@ -316,7 +398,7 @@ func (p *Pack) fetchManifest(ctx context.Context) (*Manifest, error) {
 // the pack. A file the user's Ensure already fetched is skipped.
 func (p *Pack) prefetch(ctx context.Context, m *Manifest) {
 	if p.cachedCount(m) == 0 {
-		if err := p.fetchArchive(ctx, m); err != nil {
+		if err := p.fetchArchive(ctx, m, nil, nil); err != nil {
 			if ctx.Err() != nil {
 				return
 			}
@@ -357,14 +439,15 @@ func (p *Pack) cachedCount(m *Manifest) int {
 
 // fetchArchive downloads a whole-repository zip, trying every source that
 // serves one, and stores each file it lists against the manifest's hash;
-// the zip itself lands in a temp file, never memory.
-func (p *Pack) fetchArchive(ctx context.Context, m *Manifest) error {
+// the zip itself lands in a temp file, never memory. onBytes follows the
+// download and onFiles the extraction, both on the caller's goroutine.
+func (p *Pack) fetchArchive(ctx context.Context, m *Manifest, onBytes func(done, total int64), onFiles func(done, total int)) error {
 	var lastErr error = errors.New("pack: no archive source")
 	for _, src := range Sources {
 		if src.archive == "" {
 			continue
 		}
-		err := p.fetchArchiveFrom(ctx, src.archive, m)
+		err := p.fetchArchiveFrom(ctx, src.archive, m, onBytes, onFiles)
 		if err == nil {
 			return nil
 		}
@@ -377,7 +460,7 @@ func (p *Pack) fetchArchive(ctx context.Context, m *Manifest) error {
 }
 
 // fetchArchiveFrom fetches one archive URL.
-func (p *Pack) fetchArchiveFrom(ctx context.Context, url string, m *Manifest) error {
+func (p *Pack) fetchArchiveFrom(ctx context.Context, url string, m *Manifest, onBytes func(done, total int64), onFiles func(done, total int)) error {
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	req, err := http.NewRequestWithContext(cctx, http.MethodGet, url, nil)
@@ -402,7 +485,13 @@ func (p *Pack) fetchArchiveFrom(ctx context.Context, url string, m *Manifest) er
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, resp.Body); err != nil {
+	var body io.Reader = resp.Body
+	if onBytes != nil {
+		total := resp.ContentLength
+		cr := &countingReader{r: resp.Body, on: func(n int64) { onBytes(n, total) }}
+		body = cr
+	}
+	if _, err := io.Copy(out, body); err != nil {
 		out.Close()
 		os.Remove(zipPath)
 		return err
@@ -450,6 +539,9 @@ func (p *Pack) fetchArchiveFrom(ctx context.Context, url string, m *Manifest) er
 			return err
 		}
 		stored++
+		if onFiles != nil {
+			onFiles(stored, len(m.Files))
+		}
 	}
 	if stored == 0 {
 		return errors.New("archive: no manifest files inside")
@@ -579,4 +671,19 @@ func (p *Pack) client() *http.Client {
 		client.c = &http.Client{} // timeouts come per request via contexts
 	})
 	return client.c
+}
+
+// countingReader wraps a reader, reporting the running total of bytes
+// read through it.
+type countingReader struct {
+	r  io.Reader
+	n  int64
+	on func(n int64)
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	c.on(c.n)
+	return n, err
 }

@@ -39,10 +39,12 @@ type app struct {
 	// through refresh instead, so sliders never rebuild the grid.
 	gridRev *core.Signal[int]
 
-	focusOpen  *core.Signal[bool]
-	editorOpen *core.Signal[bool]
-	editorID   *core.Signal[string] // "" = new preset, else the custom id
-	master     *core.Signal[float64]
+	focusOpen   *core.Signal[bool]
+	editorOpen  *core.Signal[bool]
+	editorID    *core.Signal[string] // "" = new preset, else the custom id
+	master      *core.Signal[float64]
+	welcomeOpen *core.Signal[bool] // first launch: the sound pack's download dialog
+	packReady   *core.Signal[bool] // the manifest has arrived
 
 	activeID      string // applied preset ID, "" when none
 	activePreset  catalog.Preset
@@ -60,13 +62,17 @@ func Main(cx *core.Scope, deps Deps) core.Node {
 		editorOpen:    core.NewSignal(cx, false),
 		editorID:      core.NewSignal(cx, ""),
 		master:        core.NewSignal(cx, 0.8),
+		welcomeOpen:   core.NewSignal(cx, false),
+		packReady:     core.NewSignal(cx, false),
 		activeVolumes: map[string]float64{},
 	}
 
 	// The sound pack runs in the background: its manifest fills the
 	// (otherwise empty) catalog with every sound the repository lists —
 	// labels and category names from its labels.json — then the cache
-	// fills quietly. The app is fully usable before any of it.
+	// fills quietly. A cold start (nothing cached) holds the prefetch for
+	// the welcome dialog instead, so the user consents to the download.
+	coldStart := deps.Pack != nil && deps.Pack.CachedCount() == 0
 	if deps.Pack != nil {
 		deps.Pack.Start(func(m *pack.Manifest) {
 			for _, f := range m.Files {
@@ -81,8 +87,12 @@ func Main(cx *core.Scope, deps Deps) core.Node {
 			for id, cm := range m.Categories {
 				a.deps.Catalog.SetCategoryMeta(id, cm.Title, cm.Emoji)
 			}
+			a.packReady.Set(true)
 			a.bumpRefresh()
-		})
+		}, !coldStart)
+	}
+	if coldStart {
+		a.welcomeOpen.Set(true)
 	}
 
 	return core.View{
@@ -105,6 +115,17 @@ func Main(cx *core.Scope, deps Deps) core.Node {
 			}},
 			core.Show{When: a.focusOpen.Get, Then: func(cx *core.Scope) core.Node {
 				return focusView(cx, a)
+			}},
+			core.Show{When: a.welcomeOpen.Get, Then: func(cx *core.Scope) core.Node {
+				return welcomePanel(cx, welcomeState{
+					open:  a.welcomeOpen,
+					pack:  deps.Pack,
+					ready: a.packReady.Get,
+					onReady: func() {
+						a.welcomeOpen.Set(false)
+						a.bumpRefresh()
+					},
+				})
 			}},
 		},
 	}
