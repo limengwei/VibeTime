@@ -29,6 +29,10 @@ type Deps struct {
 type app struct {
 	deps    Deps
 	refresh *core.Signal[int] // bumped when plain state changes
+	// gridRev rebuilds the preset grid, only when the preset list itself
+	// changes (a preset saved or deleted); volume tweaks restyle the cards
+	// through refresh instead, so sliders never rebuild the grid.
+	gridRev *core.Signal[int]
 
 	focusOpen  *core.Signal[bool]
 	editorOpen *core.Signal[bool]
@@ -46,6 +50,7 @@ func Main(cx *core.Scope, deps Deps) core.Node {
 	a := &app{
 		deps:          deps,
 		refresh:       core.NewSignal(cx, 0),
+		gridRev:       core.NewSignal(cx, 0),
 		focusOpen:     core.NewSignal(cx, false),
 		editorOpen:    core.NewSignal(cx, false),
 		editorID:      core.NewSignal(cx, ""),
@@ -122,7 +127,15 @@ func (a *app) applyPreset(p catalog.Preset) {
 		vols[id] = v
 	}
 	a.activeID, a.activePreset, a.activeOrder, a.activeVolumes = p.ID, p, order, vols
-	a.refresh.Set(a.refresh.Get() + 1)
+	a.bumpRefresh()
+}
+
+// bumpRefresh re-renders what follows plain state. It reads untracked so a
+// bump from inside an effect never makes that effect depend on refresh — a
+// tracked read there would re-run the effect forever (the editor's open
+// effect once did, saturating the render goroutine and lagging the dialog).
+func (a *app) bumpRefresh() {
+	a.refresh.Set(a.refresh.GetUntracked() + 1)
 }
 
 // stopAll stops every sound; clearScene also drops the applied preset.
@@ -133,7 +146,7 @@ func (a *app) stopAll(clearScene bool) {
 		a.activeOrder = nil
 		a.activeVolumes = map[string]float64{}
 	}
-	a.refresh.Set(a.refresh.Get() + 1)
+	a.bumpRefresh()
 }
 
 // setSoundVolume changes one playing sound's volume and persists it as the
@@ -154,17 +167,22 @@ func (a *app) setSoundVolume(id string, v float64) {
 		st.Custom[i] = cp
 		_ = st.Save()
 	}
-	a.refresh.Set(a.refresh.Get() + 1)
+	a.bumpRefresh()
 }
 
-// presetGrid renders the scene cards and the add card.
+// presetGrid renders the scene cards and the add card. A Dynamic, not a
+// Show: the branch must rebuild whenever a preset is added, edited or
+// deleted, which changes no boolean the grid could watch.
 func presetGrid(a *app) core.Node {
-	cards := []core.Node{}
-	for _, p := range a.presets() {
-		cards = append(cards, presetCard(a, p))
-	}
-	cards = append(cards, addCard(a))
-	return ui.Wrap{Children: cards}
+	return core.Dynamic(func(cx *core.Scope) core.Node {
+		a.gridRev.Get()
+		cards := []core.Node{}
+		for _, p := range a.presets() {
+			cards = append(cards, presetCard(a, p))
+		}
+		cards = append(cards, addCard(a))
+		return ui.Wrap{Children: cards}
+	})
 }
 
 // presetCard is one scene card.
@@ -188,7 +206,7 @@ func presetCard(a *app, p catalog.Preset) core.Node {
 					if a.activeID == p.ID {
 						a.stopAll(true)
 					}
-					a.refresh.Set(a.refresh.Get() + 1)
+					a.gridRev.Set(a.gridRev.GetUntracked() + 1)
 				}
 			}),
 		)
@@ -264,14 +282,11 @@ func addCard(a *app) core.Node {
 	}
 }
 
-// mixerPanel is the applied preset's per-sound volume cards.
+// mixerPanel is the applied preset's per-sound volume cards. The rows are
+// an Each over the active order: switching presets swaps rows by sound ID,
+// while a volume drag keeps each row (and its slider) in place.
 func mixerPanel(a *app) core.Node {
 	return core.Show{When: func() bool { a.refresh.Get(); return a.activeID != "" }, Then: func(cx *core.Scope) core.Node {
-		p := a.activePreset
-		cards := make([]core.Node, 0, len(a.activeOrder))
-		for _, id := range a.activeOrder {
-			cards = append(cards, mixerCard(a, id))
-		}
 		return core.View{
 			Class: "flex-col gap-3 p-4 rounded-2xl",
 			Style: core.Style{
@@ -280,10 +295,16 @@ func mixerPanel(a *app) core.Node {
 			},
 			Children: []core.Node{
 				core.View{Class: "flex-row items-center gap-2", Children: []core.Node{
-					core.Text{Content: p.Icon, Style: core.Style{FontSize: 18}},
-					core.Text{Content: p.Name, Style: core.Style{FontSize: 14, FontWeight: core.FontWeightMedium, Color: core.RGBA(0xffffff, 0.8)}},
+					core.Text{ContentFunc: func() string { a.refresh.Get(); return a.activePreset.Icon }, Style: core.Style{FontSize: 18}},
+					core.Text{ContentFunc: func() string { a.refresh.Get(); return a.activePreset.Name }, Style: core.Style{FontSize: 14, FontWeight: core.FontWeightMedium, Color: core.RGBA(0xffffff, 0.8)}},
 				}},
-				ui.Wrap{Children: cards},
+				ui.Wrap{Children: []core.Node{core.Each(
+					func() []string { a.refresh.Get(); return a.activeOrder },
+					func(id string) string { return id },
+					func(cx *core.Scope, item func() string, _ func() int) core.Node {
+						return mixerCard(a, item())
+					},
+				)}},
 			},
 		}
 	}}

@@ -134,7 +134,18 @@ func presetEditor(cx *core.Scope, a *app) core.Node {
 									Background:  core.RGBA(0x8b5cf6, 0.06),
 									BorderColor: core.RGBA(0x8b5cf6, 0.15), BorderWidth: 1,
 								},
-								Children: []core.Node{e.selectedTags()},
+								// Each, not a plain slice: Show rebuilds its
+								// branch only when When flips, so picking a
+								// second sound would never reach a static
+								// children list. Rows keyed by sound ID also
+								// survive volume drags.
+								Children: []core.Node{core.Each(
+									func() []string { e.selRefresh.Get(); return e.order },
+									func(id string) string { return id },
+									func(cx *core.Scope, item func() string, _ func() int) core.Node {
+										return e.tag(item())
+									},
+								)},
 							}
 						}},
 					}},
@@ -172,6 +183,14 @@ func randomIcon() string {
 	return randomIcons[rand.IntN(len(randomIcons))]
 }
 
+// bumpSel re-renders what follows the selection. It reads untracked: pick
+// runs from the editor's open effect when editing a preset, and a tracked
+// read there would make that effect depend on — and forever re-run against —
+// its own write.
+func (e *editor) bumpSel() {
+	e.selRefresh.Set(e.selRefresh.GetUntracked() + 1)
+}
+
 // pick adds a sound (previewing it) at volume v.
 func (e *editor) pick(id string, v float64) {
 	if _, ok := e.selected[id]; ok {
@@ -183,7 +202,7 @@ func (e *editor) pick(id string, v float64) {
 	e.selected[id] = v
 	e.order = append(e.order, id)
 	e.a.deps.Engine.Play(id, v)
-	e.selRefresh.Set(e.selRefresh.Get() + 1)
+	e.bumpSel()
 }
 
 // unpick removes a sound and stops its preview.
@@ -197,7 +216,7 @@ func (e *editor) unpick(id string) {
 			}
 		}
 		e.a.deps.Engine.Stop(id)
-		e.selRefresh.Set(e.selRefresh.Get() + 1)
+		e.bumpSel()
 	}
 }
 
@@ -265,48 +284,45 @@ func (e *editor) save() {
 		// running either way.
 		_ = err
 	}
+	// The grid must show the new or edited card right away.
+	e.a.gridRev.Set(e.a.gridRev.GetUntracked() + 1)
 	e.a.editorOpen.Set(false)
 	// Apply fresh: applyPreset skips a repeated ID, so clear it first.
 	e.a.activeID = ""
 	e.a.applyPreset(p)
 }
 
-// selectedTags renders the picked sounds with volume sliders and removes.
-func (e *editor) selectedTags() core.Node {
-	tags := make([]core.Node, 0, len(e.order))
-	for _, id := range e.order {
-		id := id
-		sound, _ := e.a.deps.Catalog.Sound(id)
-		tags = append(tags, core.View{
-			Class: "flex-row items-center gap-1.5 px-2 py-1 rounded-lg",
-			Style: core.Style{Background: core.RGBA(0xffffff, 0.08)},
-			Children: []core.Node{
-				core.Text{Content: sound.Label, Style: core.Style{FontSize: 11, Color: core.RGBA(0xffffff, 0.7)}},
-				ui.Slider{
-					Min: 0.05, Max: 1, Step: 0.05,
-					Value: func() float64 { e.selRefresh.Get(); return e.selected[id] },
-					OnChange: func(v float64) {
-						e.selected[id] = v
-						e.a.deps.Engine.SetVolume(id, v)
-						e.selRefresh.Set(e.selRefresh.Get() + 1)
-					},
-					Style: core.Style{Width: core.Pt(64)},
-					Label: sound.Label,
+// tag renders one chosen sound with its volume slider and remove button.
+func (e *editor) tag(id string) core.Node {
+	sound, _ := e.a.deps.Catalog.Sound(id)
+	return core.View{
+		Class: "flex-row items-center gap-1.5 px-2 py-1 rounded-lg",
+		Style: core.Style{Background: core.RGBA(0xffffff, 0.08)},
+		Children: []core.Node{
+			core.Text{Content: sound.Label, Style: core.Style{FontSize: 11, Color: core.RGBA(0xffffff, 0.7)}},
+			ui.Slider{
+				Min: 0.05, Max: 1, Step: 0.05,
+				Value: func() float64 { e.selRefresh.Get(); return e.selected[id] },
+				OnChange: func(v float64) {
+					e.selected[id] = v
+					e.a.deps.Engine.SetVolume(id, v)
+					e.bumpSel()
 				},
-				core.View{
-					OnPress: func(core.PressEvent) { e.unpick(id) },
-					NoFocus: true,
-					Label:   "移除 " + sound.Label,
-					Style:   core.Style{Padding: core.All(2)},
-					StyleFunc: func() core.Style {
-						return core.Style{Hover: &core.Style{Background: core.RGBA(0xffffff, 0.1)}}
-					},
-					Children: []core.Node{core.Icon{SVG: iconX, Style: core.Style{Width: core.Pt(10), Height: core.Pt(10), Color: core.RGBA(0xffffff, 0.3)}}},
-				},
+				Style: core.Style{Width: core.Pt(64)},
+				Label: sound.Label,
 			},
-		})
+			core.View{
+				OnPress: func(core.PressEvent) { e.unpick(id) },
+				NoFocus: true,
+				Label:   "移除 " + sound.Label,
+				Style:   core.Style{Padding: core.All(2)},
+				StyleFunc: func() core.Style {
+					return core.Style{Hover: &core.Style{Background: core.RGBA(0xffffff, 0.1)}}
+				},
+				Children: []core.Node{core.Icon{SVG: iconX, Style: core.Style{Width: core.Pt(10), Height: core.Pt(10), Color: core.RGBA(0xffffff, 0.3)}}},
+			},
+		},
 	}
-	return ui.Wrap{Children: tags}
 }
 
 // categoryGroups renders every category's sound chips.
