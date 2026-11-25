@@ -235,25 +235,34 @@ func openAt(dir string, post func(func()), ctxFn func() context.Context) (*Pack,
 	return p, nil
 }
 
-// Start delivers the core manifest first — the cached cloud manifest, if
-// any, rides along so the sound picker never waits on the cloud branch —
-// then refreshes the cloud manifest in the background and finally
-// prefetches whatever is missing. When the fresh cloud list lands it
-// replaces the cache and onSync runs again with it; a cloud fetch that
-// fails just keeps the cache. Only the core manifest failing with no
-// cache at all runs onFail instead; calling Start again retries.
+// Start delivers whatever is cached first — a warm start paints its whole
+// library the moment the app opens, network notwithstanding — then
+// refreshes: the core manifest, the cloud manifest behind it, and finally
+// the background prefetch. Each refresh that lands re-runs onSync (the
+// sync is idempotent); refreshes that fail keep the cached copies. Only a
+// cold start with no cache and no successful fetch runs onFail instead;
+// calling Start again retries.
 //
 // The prefetch and the whole-repository zip cover the core library only;
 // cloud sounds stay on-demand.
 func (p *Pack) Start(onSync func(main, cloud *Manifest), prefetch bool, onFail func()) {
 	go func() {
 		ctx := p.ctxFn()
+
+		// The cached manifests go out before any network: the sound
+		// picker is usable at once, not when the mirrors answer.
+		p.mu.Lock()
+		cachedMain, cachedCloud := p.man, p.cloud
+		p.mu.Unlock()
+		if cachedMain != nil {
+			p.post(func() { onSync(cachedMain, cachedCloud) })
+		}
+
 		m, err := p.fetchCore(ctx)
 		if err != nil {
 			log.Printf("[pack] manifest 拉取失败（使用本地缓存）: %v", err)
 			p.mu.Lock()
 			m = p.man
-			cloud := p.cloud
 			p.mu.Unlock()
 			if m == nil {
 				if onFail != nil {
@@ -261,8 +270,7 @@ func (p *Pack) Start(onSync func(main, cloud *Manifest), prefetch bool, onFail f
 				}
 				return
 			}
-			mm, cm := m, cloud
-			p.post(func() { onSync(mm, cm) })
+			// The cached copy already went out above; nothing new to say.
 			return
 		}
 		if err := p.cacheManifest(p.manifestPath(), m); err != nil {
@@ -271,11 +279,10 @@ func (p *Pack) Start(onSync func(main, cloud *Manifest), prefetch bool, onFail f
 		p.mu.Lock()
 		p.man = m
 		p.extraRaw = m.Sources
-		cloud := p.cloud // the cached copy goes out first; the fresh one follows
+		cloud := p.cloud // the cached cloud list rides along; the fresh one follows
 		p.mu.Unlock()
 		p.prune(m, cloud)
-		mm, cm := m, cloud
-		p.post(func() { onSync(mm, cm) })
+		p.post(func() { onSync(m, cloud) })
 
 		// The cloud tier loads behind the picker's first paint: a slow or
 		// missing cloud branch never blocks the core list.

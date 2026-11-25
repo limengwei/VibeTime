@@ -25,10 +25,11 @@ func bgCtx() context.Context { return context.Background() }
 // fakeRepo is a mutable in-memory pack repository served over HTTP; tests
 // flip its contents between Start calls to simulate repository updates.
 type fakeRepo struct {
-	mu   sync.Mutex
-	path map[string][]byte
-	html map[string]bool // entries served as text/html (risk-control pages)
-	hits map[string]int
+	mu    sync.Mutex
+	path  map[string][]byte
+	html  map[string]bool          // entries served as text/html (risk-control pages)
+	delay map[string]time.Duration // per-path artificial latency
+	hits  map[string]int
 }
 
 func newFakeRepo() *fakeRepo {
@@ -62,9 +63,24 @@ func (r *fakeRepo) hitsFor(rel string) int {
 	return r.hits[rel]
 }
 
+// setSlow delays one path's answers, simulating a lagging network.
+func (r *fakeRepo) setSlow(rel string, d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.delay == nil {
+		r.delay = map[string]time.Duration{}
+	}
+	r.delay[rel] = d
+}
+
 func (r *fakeRepo) serve(w http.ResponseWriter, req *http.Request) {
 	rel := strings.TrimPrefix(req.URL.Path, "/")
 	r.mu.Lock()
+	if d, slow := r.delay[rel]; slow && d > 0 {
+		r.mu.Unlock()
+		time.Sleep(d)
+		r.mu.Lock()
+	}
 	data, ok := r.path[rel]
 	isHTML := r.html[rel]
 	r.hits[rel]++
@@ -223,10 +239,13 @@ func TestUpdatePropagation(t *testing.T) {
 	repo.del(b.Path)
 	repo.set("labels.json", `{"labels":{"a":"甲改名","c":"丙"}}`)
 
-	p.Start(func(m, _ *Manifest) { manifests <- m }, true, nil)
-	if m := <-manifests; m.Labels["a"] != "甲改名" {
-		t.Fatalf("renamed label did not arrive: %v", m.Labels)
-	}
+	p.Start(func(m, _ *Manifest) {}, true, nil)
+	// The cached v1 delivers first; the v2 refresh follows.
+	waitFor(t, func() bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.man != nil && p.man.Labels["a"] == "甲改名"
+	}, "v2 manifest with the renamed label arrived")
 	waitFor(t, func() bool {
 		return p.fresh(a2) && p.fresh(c) && !fileExists(diskPath(p.dir, b))
 	}, "v2 propagated: re-download, addition, retirement")
@@ -389,6 +408,42 @@ func TestAttributionDirectURL(t *testing.T) {
 	direct.setHTML("blocked", "<html>blocked</html>")
 	p.Start(func(m, _ *Manifest) {}, true, nil)
 	waitFor(t, func() bool { return p.fresh(b) }, "HTML attribution fell back to the repository source")
+}
+
+// TestWarmStartShowsCacheBeforeNetwork pins the user-visible promise: a
+// warm start's cached library delivers while the network is still
+// chewing on the manifest.
+func TestWarmStartShowsCacheBeforeNetwork(t *testing.T) {
+	repo := newFakeRepo()
+	srv := serveRepo(t, repo)
+	p := newPack(t, srv.URL)
+
+	a := entry("cat/a", "A")
+	repo.set("manifest.json", manifestJSON(t, 1, []File{a}))
+	repo.set(a.Path, "A")
+	p.Start(func(m, _ *Manifest) {}, true, nil)
+	waitFor(t, func() bool { return p.fresh(a) }, "v1 downloaded")
+
+	// A restart into a network that answers slowly.
+	repo.setSlow("manifest.json", 1500*time.Millisecond)
+	p2, err := openAt(p.dir, syncPost, bgCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivered := make(chan *Manifest, 2)
+	start := time.Now()
+	p2.Start(func(m, _ *Manifest) { delivered <- m }, true, nil)
+	select {
+	case m := <-delivered:
+		if len(m.Files) != 1 {
+			t.Fatalf("cached manifest wrong: %d files", len(m.Files))
+		}
+		if since := time.Since(start); since > 500*time.Millisecond {
+			t.Fatalf("cached manifest delivered only after %v — it raced the network", since)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cached manifest never delivered")
+	}
 }
 
 // TestCloudManifestConvertAndCache covers the cloud tier's arrival: the
