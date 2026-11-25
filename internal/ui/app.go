@@ -190,7 +190,7 @@ func presetCard(a *app, p catalog.Preset) core.Node {
 	children := []core.Node{
 		core.Text{Content: p.Icon, Style: core.Style{FontSize: 30}},
 		core.Text{Content: p.Name, Style: core.Style{FontSize: 13, FontWeight: core.FontWeightMedium, Color: core.RGBA(0xffffff, 0.85), TextAlign: core.TextAlignCenter}},
-		core.Text{Content: p.Desc, MaxLines: 2, Style: core.Style{FontSize: 11, Color: core.RGBA(0xffffff, 0.3), TextAlign: core.TextAlignCenter}},
+		core.Text{Content: p.Desc, MaxLines: 1, Style: core.Style{FontSize: 11, Color: core.RGBA(0xffffff, 0.3), TextAlign: core.TextAlignCenter}},
 	}
 	// Custom cards add edit and delete in the corners.
 	if !p.Builtin {
@@ -240,9 +240,9 @@ func presetCard(a *app, p catalog.Preset) core.Node {
 			Class: "flex-col items-center gap-1",
 			// Relative anchors the corner buttons' absolute placement to
 			// the card (a static ancestor would let them escape to a
-			// farther one); the full width bounds the description, so it
-			// wraps and its MaxLines ellipsizes instead of stretching the
-			// card with one long line.
+			// farther one); the full width bounds the description, so its
+			// MaxLines ellipsizes instead of stretching the card with one
+			// long line.
 			Style:    core.Style{Width: core.Pct(100), Position: core.Relative},
 			Children: children,
 		}},
