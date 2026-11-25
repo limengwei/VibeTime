@@ -50,7 +50,7 @@ func defaultSources() []string {
 		return out
 	}
 	return []string{
-		"https://gitee.com/limengwei/vibe-time-sound/raw/master",
+		"https://gitee.com/limengwe/vibe-time-sound/raw/master",
 		"https://raw.githubusercontent.com/limengwei/vibe-time-sound/master",
 	}
 }
