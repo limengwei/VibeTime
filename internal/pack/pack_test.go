@@ -15,6 +15,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"vibe-time/internal/catalog"
 )
 
 func syncPost(f func())      { f() }
@@ -117,6 +119,34 @@ func manifestJSON(t *testing.T, version int, files []File) string {
 	return string(data)
 }
 
+// cloudEntry pairs a cloud sound's File with its cloud-manifest metadata.
+type cloudEntry struct {
+	File
+	title, license, origin string
+}
+
+// cloudJSON marshals a cloud-manifest.json wire document.
+func cloudJSON(t *testing.T, version int, entries []cloudEntry) string {
+	t.Helper()
+	cm := cloudManifest{Version: version, Categories: map[string]catalog.CategoryMeta{"cat": {Title: "云端", Emoji: "☁️"}}}
+	for _, e := range entries {
+		cat := e.ID
+		if i := strings.LastIndex(e.ID, "/"); i >= 0 {
+			cat = e.ID[:i]
+		}
+		cm.Files = append(cm.Files, cloudFile{
+			ID: e.ID, Title: e.title, Category: cat,
+			Path: e.Path, Size: e.Size, SHA256: e.SHA256,
+			License: e.license, Origin: e.origin,
+		})
+	}
+	data, err := json.Marshal(cm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
 func waitFor(t *testing.T, cond func() bool, msg string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -164,7 +194,7 @@ func TestUpdatePropagation(t *testing.T) {
 	repo.set("labels.json", `{"labels":{"a":"甲","b":"乙"}}`)
 
 	manifests := make(chan *Manifest, 2)
-	p.Start(func(m *Manifest) { manifests <- m }, true, nil)
+	p.Start(func(m, _ *Manifest) { manifests <- m }, true, nil)
 	if m := <-manifests; len(m.Files) != 2 || m.Labels["a"] != "甲" {
 		t.Fatalf("v1 manifest = %d files, labels %v", len(m.Files), m.Labels)
 	}
@@ -186,7 +216,7 @@ func TestUpdatePropagation(t *testing.T) {
 	repo.del(b.Path)
 	repo.set("labels.json", `{"labels":{"a":"甲改名","c":"丙"}}`)
 
-	p.Start(func(m *Manifest) { manifests <- m }, true, nil)
+	p.Start(func(m, _ *Manifest) { manifests <- m }, true, nil)
 	if m := <-manifests; m.Labels["a"] != "甲改名" {
 		t.Fatalf("renamed label did not arrive: %v", m.Labels)
 	}
@@ -217,7 +247,7 @@ func TestStateMigrationWithoutRedownload(t *testing.T) {
 	a := entry("cat/a", "A")
 	repo.set("manifest.json", manifestJSON(t, 1, []File{a}))
 	repo.set(a.Path, "A")
-	p.Start(func(m *Manifest) {}, true, nil)
+	p.Start(func(m, _ *Manifest) {}, true, nil)
 	waitFor(t, func() bool { return p.fresh(a) }, "v1 downloaded")
 
 	if err := os.Remove(filepath.Join(p.dir, "state.json")); err != nil {
@@ -228,7 +258,7 @@ func TestStateMigrationWithoutRedownload(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := repo.hitsFor(a.Path)
-	p2.Start(func(m *Manifest) {}, true, nil)
+	p2.Start(func(m, _ *Manifest) {}, true, nil)
 	waitFor(t, func() bool { return p2.fresh(a) }, "local file validated by hash")
 
 	if after := repo.hitsFor(a.Path); after != before {
@@ -252,7 +282,7 @@ func TestRepoDeliveredSources(t *testing.T) {
 	files.set(a.Path, "A")
 
 	p := newPack(t, mainSrv.URL)
-	p.Start(func(m *Manifest) {}, true, nil)
+	p.Start(func(m, _ *Manifest) {}, true, nil)
 	waitFor(t, func() bool { return p.fresh(a) }, "file fetched via the delivered source")
 
 	if files.hitsFor(a.Path) == 0 {
@@ -282,6 +312,7 @@ func TestColdStartArchive(t *testing.T) {
 		{"vibe-time-sound-master/manifest.json", manifestJSON(t, 1, []File{a, b})},
 		{"vibe-time-sound-master/sounds/cat/a.m4a", "A"},
 		{"vibe-time-sound-master/sounds/cat/b.m4a", "BB"},
+		{"vibe-time-sound-master/cloud/cat/c.mp3", "CLOUD"}, // never extracted: not in the core manifest
 	} {
 		w, err := zw.Create(e.name)
 		if err != nil {
@@ -304,11 +335,14 @@ func TestColdStartArchive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p.Start(func(m *Manifest) {}, true, nil)
+	p.Start(func(m, _ *Manifest) {}, true, nil)
 	waitFor(t, func() bool { return p.fresh(a) && p.fresh(b) }, "cold start filled from the archive")
 
 	if n := repo.hitsFor(a.Path); n != 0 {
 		t.Fatalf("per-file request made although the zip covered it: %d", n)
+	}
+	if fileExists(p.cloudDir()) {
+		t.Fatal("the cloud tier was extracted from the core zip")
 	}
 	state := readState(t, p.dir)
 	if state["cat/a"] != a.SHA256 || state["cat/b"] != b.SHA256 {
@@ -329,7 +363,7 @@ func TestAttributionDirectURL(t *testing.T) {
 	direct.set(a.Path, "A")
 
 	p := newPack(t, repoSrv.URL)
-	p.Start(func(m *Manifest) {}, true, nil)
+	p.Start(func(m, _ *Manifest) {}, true, nil)
 	waitFor(t, func() bool { return p.fresh(a) }, "file fetched via the attribution URL")
 	p.mu.Lock()
 	att := p.man.Attribution["a"]
@@ -346,6 +380,153 @@ func TestAttributionDirectURL(t *testing.T) {
 	repo.set("labels.json", `{"attribution":{"b":{"url":"`+directSrv.URL+`/blocked"}}}`)
 	direct.del(a.Path)
 	direct.setHTML("blocked", "<html>blocked</html>")
-	p.Start(func(m *Manifest) {}, true, nil)
+	p.Start(func(m, _ *Manifest) {}, true, nil)
 	waitFor(t, func() bool { return p.fresh(b) }, "HTML attribution fell back to the repository source")
+}
+
+// TestCloudManifestConvertAndCache covers the cloud tier's arrival: the
+// wire document converts into the internal manifest shape (titles as
+// labels, license/origin as attribution), the copy is cached, and nothing
+// downloads until asked.
+func TestCloudManifestConvertAndCache(t *testing.T) {
+	repo := newFakeRepo()
+	srv := serveRepo(t, repo)
+	p := newPack(t, srv.URL)
+
+	a := entry("cat/a", "A")
+	ce := cloudEntry{File: entry("cat/c", "CCC"), title: "丙", license: "CC-BY", origin: "https://example.org/set"}
+	repo.set("manifest.json", manifestJSON(t, 1, []File{a}))
+	repo.set(a.Path, "A")
+	repo.set("cloud-manifest.json", cloudJSON(t, 1, []cloudEntry{ce}))
+	repo.set(ce.Path, "CCC")
+
+	clouds := make(chan *Manifest, 2)
+	p.Start(func(_, cloud *Manifest) { clouds <- cloud }, true, nil)
+	cloud := <-clouds
+	if cloud == nil || len(cloud.Files) != 1 {
+		t.Fatalf("cloud manifest = %+v", cloud)
+	}
+	if cloud.Labels["c"] != "丙" {
+		t.Fatalf("title not converted to a label: %v", cloud.Labels)
+	}
+	if cloud.Attribution["c"].License != "CC-BY" || cloud.Attribution["c"].Origin != "https://example.org/set" {
+		t.Fatalf("attribution not converted: %v", cloud.Attribution)
+	}
+	waitFor(t, func() bool { return p.fresh(a) }, "core file downloaded")
+
+	// The cloud tier stays on the shelf: bytes only when asked.
+	if fileExists(diskPath(p.dir, ce.File)) {
+		t.Fatal("cloud sound downloaded although the tier is on-demand")
+	}
+	if _, err := p.readManifest(p.cloudManifestPath()); err != nil {
+		t.Fatalf("cloud manifest not cached: %v", err)
+	}
+}
+
+// TestCloudOnDemandOnly covers the tier's promise: a full prefetch pass
+// never touches a cloud sound, and Ensure fetches it on the spot.
+func TestCloudOnDemandOnly(t *testing.T) {
+	repo := newFakeRepo()
+	srv := serveRepo(t, repo)
+	p := newPack(t, srv.URL)
+
+	a := entry("cat/a", "A")
+	ce := cloudEntry{File: entry("cat/c", "CCC"), title: "丙"}
+	repo.set("manifest.json", manifestJSON(t, 1, []File{a}))
+	repo.set(a.Path, "A")
+	repo.set("cloud-manifest.json", cloudJSON(t, 1, []cloudEntry{ce}))
+	repo.set(ce.Path, "CCC")
+
+	p.Start(func(m, _ *Manifest) {}, true, nil)
+	waitFor(t, func() bool { return p.fresh(a) }, "core file downloaded")
+
+	if n := repo.hitsFor(ce.Path); n != 0 {
+		t.Fatalf("cloud sound requested during prefetch: %d hits", n)
+	}
+	if p.Cached(ce.ID) {
+		t.Fatal("cloud sound cached without a request")
+	}
+
+	done := make(chan bool, 1)
+	p.Ensure(ce.ID, func(ok bool) { done <- ok })
+	if ok := <-done; !ok {
+		t.Fatal("Ensure failed for the cloud sound")
+	}
+	if !p.fresh(ce.File) {
+		t.Fatal("cloud sound not stored")
+	}
+	if n := repo.hitsFor(ce.Path); n == 0 {
+		t.Fatal("cloud sound never fetched")
+	}
+	if state := readState(t, p.dir); state[ce.ID] != ce.SHA256 {
+		t.Fatalf("state entry for the cloud sound missing: %v", state)
+	}
+}
+
+// TestCloudPrune covers retirement: a cloud sound that leaves the cloud
+// manifest loses both its file and its state entry.
+func TestCloudPrune(t *testing.T) {
+	repo := newFakeRepo()
+	srv := serveRepo(t, repo)
+	p := newPack(t, srv.URL)
+
+	a := entry("cat/a", "A")
+	ce := cloudEntry{File: entry("cat/c", "CCC"), title: "丙"}
+	next := cloudEntry{File: entry("cat/d", "DDD"), title: "丁"}
+	repo.set("manifest.json", manifestJSON(t, 1, []File{a}))
+	repo.set(a.Path, "A")
+	repo.set("cloud-manifest.json", cloudJSON(t, 1, []cloudEntry{ce}))
+	repo.set(ce.Path, "CCC")
+
+	p.Start(func(m, _ *Manifest) {}, true, nil)
+	waitFor(t, func() bool { return p.fresh(a) }, "core file downloaded")
+	done := make(chan bool, 1)
+	p.Ensure(ce.ID, func(ok bool) { done <- ok })
+	if ok := <-done; !ok {
+		t.Fatal("Ensure failed for the cloud sound")
+	}
+
+	// v2 swaps the cloud entry out.
+	repo.set("cloud-manifest.json", cloudJSON(t, 2, []cloudEntry{next}))
+	repo.set(next.Path, "DDD")
+	p.Start(func(m, _ *Manifest) {}, true, nil)
+	waitFor(t, func() bool { return !fileExists(diskPath(p.dir, ce.File)) }, "retired cloud file removed")
+
+	if _, ok := readState(t, p.dir)[ce.ID]; ok {
+		t.Fatal("state kept the retired cloud sound")
+	}
+}
+
+// TestCloudOfflineRestore covers an offline restart: both manifests come
+// back from the local copies, before any request can answer.
+func TestCloudOfflineRestore(t *testing.T) {
+	repo := newFakeRepo()
+	srv := serveRepo(t, repo)
+	p := newPack(t, srv.URL)
+
+	a := entry("cat/a", "A")
+	ce := cloudEntry{File: entry("cat/c", "CCC"), title: "丙"}
+	repo.set("manifest.json", manifestJSON(t, 1, []File{a}))
+	repo.set(a.Path, "A")
+	repo.set("cloud-manifest.json", cloudJSON(t, 1, []cloudEntry{ce}))
+	repo.set(ce.Path, "CCC")
+
+	p.Start(func(m, _ *Manifest) {}, true, nil)
+	waitFor(t, func() bool { return p.fresh(a) }, "core file downloaded")
+
+	// The repository goes dark; a restart still delivers both manifests.
+	repo.del("manifest.json")
+	repo.del("cloud-manifest.json")
+	repo.del(a.Path)
+	repo.del(ce.Path)
+	p2, err := openAt(p.dir, syncPost, bgCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	synced := make(chan *Manifest, 4)
+	p2.Start(func(m, cloud *Manifest) { synced <- m; synced <- cloud }, true, nil)
+	m, cloud := <-synced, <-synced
+	if m == nil || cloud == nil || len(cloud.Files) != 1 {
+		t.Fatalf("offline manifests = %v, %v", m, cloud)
+	}
 }

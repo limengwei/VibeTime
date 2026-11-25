@@ -15,12 +15,15 @@ import (
 // not shipped with the app, so a cold start walks the user through
 // fetching it before anything can play.
 type welcomeState struct {
-	open    *core.Signal[bool]
-	pack    *pack.Pack
-	ready   func() bool // the manifest has arrived
-	failed  func() bool // the manifest could not be fetched
-	onRetry func()      // try the manifest again
-	onReady func()      // download complete: close and enter the app
+	open   *core.Signal[bool]
+	pack   *pack.Pack
+	ready  func() bool // the manifest has arrived
+	failed func() bool // the manifest could not be fetched
+	// stats counts the core library, for the copy below; all zeros before
+	// the manifest arrives, when the placeholders stand in.
+	stats   func() (sounds, cats, scenes int, bytes int64)
+	onRetry func() // try the manifest again
+	onReady func() // download complete: close and enter the app
 }
 
 // dlProgress is the download's latest report: a phase ("下载" the archive
@@ -67,8 +70,22 @@ func welcomePanel(cx *core.Scope, s welcomeState) core.Node {
 
 		Children: []core.Node{
 			core.View{Class: "gap-1.5 flex-col items-center", Children: []core.Node{
-				core.Text{Content: "89 个环境音效、9 大分类、12 个内置场景，自由组合属于你的宁静空间。", Style: core.Style{FontSize: 12, Color: core.RGBA(0xffffff, 0.55), TextAlign: core.TextAlignCenter}},
-				core.Text{Content: "声音库不随安装包分发，首次使用需下载（约 48.5 MB，经镜像加速的 GitHub 仓库），仅此一次，之后离线可用。", Style: core.Style{FontSize: 12, Color: core.RGBA(0xffffff, 0.4), TextAlign: core.TextAlignCenter}},
+				core.Text{ContentFunc: func() string {
+					s.ready()
+					n, cats, scenes, _ := s.stats()
+					if n > 0 {
+						return fmt.Sprintf("%d 个环境音效、%d 大分类、%d 个内置场景，自由组合属于你的宁静空间。", n, cats, scenes)
+					}
+					return "89 个环境音效、9 大分类、12 个内置场景，自由组合属于你的宁静空间。"
+				}, Style: core.Style{FontSize: 12, Color: core.RGBA(0xffffff, 0.55), TextAlign: core.TextAlignCenter}},
+				core.Text{ContentFunc: func() string {
+					s.ready()
+					_, _, _, bytes := s.stats()
+					if bytes > 0 {
+						return fmt.Sprintf("声音库不随安装包分发，首次使用需下载（约 %s，经镜像加速的 GitHub 仓库），仅此一次，之后离线可用；另有云端音效按需下载。", humanBytes(bytes))
+					}
+					return "声音库不随安装包分发，首次使用需下载（约 48.5 MB，经镜像加速的 GitHub 仓库），仅此一次，之后离线可用。"
+				}, Style: core.Style{FontSize: 12, Color: core.RGBA(0xffffff, 0.4), TextAlign: core.TextAlignCenter}},
 			}},
 
 			// download button / progress / error. TextFunc keeps the label
@@ -85,6 +102,10 @@ func welcomePanel(cx *core.Scope, s welcomeState) core.Node {
 								return "正在获取声音列表…"
 							case stateSig.Get() == "error":
 								return "重试下载"
+							}
+							s.ready()
+							if _, _, _, bytes := s.stats(); bytes > 0 {
+								return fmt.Sprintf("下载声音库（约 %s）", humanBytes(bytes))
 							}
 							return "下载声音库（约 48.5 MB）"
 						},

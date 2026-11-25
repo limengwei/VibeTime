@@ -400,6 +400,15 @@ func (e *editor) categoryGroups() []core.Node {
 		chips := make([]core.Node, 0, len(cat.Sounds))
 		for _, s := range cat.Sounds {
 			s := s
+			// A cloud sound's chip carries a small ☁ beside its label,
+			// the one visible difference of the on-demand tier.
+			chipChildren := []core.Node{core.Text{Content: s.Label, Style: core.Style{FontSize: 12}}}
+			if s.Cloud {
+				chipChildren = []core.Node{core.View{Class: "flex-row items-center gap-1", Children: []core.Node{
+					core.Text{Content: s.Label, Style: core.Style{FontSize: 12}},
+					core.Text{Content: "☁", Style: core.Style{FontSize: 10, Color: core.RGBA(0xffffff, 0.35)}},
+				}}}
+			}
 			chips = append(chips, ui.Press{
 				OnPress: func() { e.toggle(s.ID) },
 				Label:   s.Label,
@@ -425,7 +434,7 @@ func (e *editor) categoryGroups() []core.Node {
 					}
 					return core.Style{Hover: &core.Style{Background: core.RGBA(0xffffff, 0.1), Color: core.RGBA(0xffffff, 0.8)}}
 				},
-				Children: []core.Node{core.Text{Content: s.Label, Style: core.Style{FontSize: 12}}},
+				Children: chipChildren,
 			})
 		}
 		groups = append(groups, core.View{Class: "flex-col gap-1.5", Children: []core.Node{

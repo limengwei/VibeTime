@@ -153,6 +153,22 @@ func TestSyncAll(t *testing.T) {
 	}
 }
 
+func TestSyncAllCloudFlag(t *testing.T) {
+	c := Empty()
+	c.SyncAll([]Sound{
+		{ID: "cat/a", Label: "甲", Category: "cat"},
+		{ID: "cat/c", Label: "丙", Category: "cat", Cloud: true},
+	})
+	s, _ := c.Sound("cat/c")
+	if !s.Cloud {
+		t.Fatal("Cloud flag lost through SyncAll")
+	}
+	s, _ = c.Sound("cat/a")
+	if s.Cloud {
+		t.Fatal("core sound flagged Cloud")
+	}
+}
+
 func TestStoreRoundtrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "presets.json")
 	s, err := openStore(path)

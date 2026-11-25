@@ -20,6 +20,9 @@ type Sound struct {
 	Category string
 	// File is the path inside the audio FS ("category/name.ext").
 	File string
+	// Cloud marks an on-demand sound: listed by the pack repository's
+	// cloud manifest, its bytes download only when picked.
+	Cloud bool
 }
 
 // Category groups sounds the way the audio library's directories do.

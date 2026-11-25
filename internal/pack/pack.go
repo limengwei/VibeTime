@@ -123,6 +123,58 @@ func (m *Manifest) ByID(id string) (File, bool) {
 	return File{}, false
 }
 
+// cloudFile is one on-demand sound in the repository's cloud-manifest.json:
+// its metadata is self-contained — the Chinese title and category inline,
+// plus duration and where the bytes came from. Only the list is fetched;
+// the bytes download when a user actually picks the sound.
+type cloudFile struct {
+	ID         string `json:"id"`
+	Title      string `json:"title"`
+	Category   string `json:"category"`
+	Path       string `json:"path"`
+	DurationMs int64  `json:"durationMs"`
+	Size       int64  `json:"size"`
+	SHA256     string `json:"sha256"`
+	License    string `json:"license,omitempty"`
+	Origin     string `json:"origin,omitempty"`
+}
+
+// cloudManifest is the repository's cloud-manifest.json, the on-demand
+// tier alongside the core library's manifest.json.
+type cloudManifest struct {
+	Version    int                             `json:"version"`
+	Categories map[string]catalog.CategoryMeta `json:"categories"`
+	Files      []cloudFile                     `json:"files"`
+}
+
+// convertCloud folds a cloud manifest into the internal Manifest shape so
+// every existing mechanism — download, verify, state, Ensure — serves the
+// cloud tier unchanged. Titles become Labels; license and origin an
+// Attribution without a URL (origin is a page, not a direct link).
+func convertCloud(c *cloudManifest) *Manifest {
+	m := &Manifest{
+		Version:     c.Version,
+		Files:       make([]File, 0, len(c.Files)),
+		Labels:      map[string]string{},
+		Categories:  c.Categories,
+		Attribution: map[string]catalog.Attribution{},
+	}
+	for _, f := range c.Files {
+		m.Files = append(m.Files, File{ID: f.ID, Path: f.Path, Size: f.Size, SHA256: f.SHA256})
+		base := f.ID
+		if i := strings.LastIndex(f.ID, "/"); i >= 0 {
+			base = f.ID[i+1:]
+		}
+		if f.Title != "" {
+			m.Labels[base] = f.Title
+		}
+		if f.License != "" || f.Origin != "" {
+			m.Attribution[base] = catalog.Attribution{Origin: f.Origin, License: f.License}
+		}
+	}
+	return m
+}
+
 // Pack is the runtime downloader and local cache.
 type Pack struct {
 	dir string // <user config>/vibe-time/pack
@@ -134,7 +186,8 @@ type Pack struct {
 	ctxFn func() context.Context
 
 	mu       sync.Mutex
-	man      *Manifest
+	man      *Manifest               // the core library: prefetched, zip-cold-started
+	cloud    *Manifest               // the on-demand tier, converted from cloud-manifest.json
 	pending  map[string][]func(bool) // waiters for a download in flight
 	state    map[string]string       // sound ID → sha256 of the bytes on disk
 	extraRaw []string                // raw sources the repository handed down
@@ -169,23 +222,32 @@ func openAt(dir string, post func(func()), ctxFn func() context.Context) (*Pack,
 		p.man = m
 		p.extraRaw = m.Sources
 	}
+	if c, err := p.readManifest(p.cloudManifestPath()); err == nil {
+		p.cloud = c
+	}
 	return p, nil
 }
 
-// Start fetches the manifest (falling back to the cached copy offline),
-// reports it on the app's goroutine, prunes files the pack dropped, then
-// prefetches whatever is missing in the background — unless prefetch is
-// false, when the welcome page's Download owns the first fill instead.
-// With no manifest to fall back to either (a first launch offline),
-// onFail runs instead of onManifest; calling Start again retries.
-func (p *Pack) Start(onManifest func(*Manifest), prefetch bool, onFail func()) {
+// Start fetches both manifests (falling back to the cached copies
+// offline), reports them together on the app's goroutine, prunes files
+// the pack dropped, then prefetches whatever is missing in the
+// background — unless prefetch is false, when the welcome page's Download
+// owns the first fill instead. The prefetch and the whole-repository zip
+// cover the core library only; cloud sounds stay on-demand.
+//
+// cloud is nil when the repository has no cloud library (or none could be
+// fetched and none is cached) — that is logged, not a failure. With no
+// core manifest to fall back to either (a first launch offline), onFail
+// runs instead of onSync; calling Start again retries.
+func (p *Pack) Start(onSync func(main, cloud *Manifest), prefetch bool, onFail func()) {
 	go func() {
 		ctx := p.ctxFn()
-		m, err := p.fetchManifest(ctx)
+		m, cloud, err := p.fetchManifest(ctx)
 		if err != nil {
 			log.Printf("[pack] manifest 拉取失败（使用本地缓存）: %v", err)
 			p.mu.Lock()
 			m = p.man
+			cloud = p.cloud
 			p.mu.Unlock()
 			if m == nil {
 				if onFail != nil {
@@ -194,18 +256,23 @@ func (p *Pack) Start(onManifest func(*Manifest), prefetch bool, onFail func()) {
 				return
 			}
 		} else {
-			data, _ := json.MarshalIndent(m, "", "  ")
-			if err := os.WriteFile(p.manifestPath(), data, 0o644); err != nil {
+			if err := p.cacheManifest(p.manifestPath(), m); err != nil {
 				log.Printf("[pack] manifest 缓存写入失败: %v", err)
+			}
+			if cloud != nil {
+				if err := p.cacheManifest(p.cloudManifestPath(), cloud); err != nil {
+					log.Printf("[pack] 云清单缓存写入失败: %v", err)
+				}
 			}
 			p.mu.Lock()
 			p.man = m
+			p.cloud = cloud
 			p.extraRaw = m.Sources
 			p.mu.Unlock()
-			p.prune(m)
+			p.prune(m, cloud)
 		}
-		mm := m
-		p.post(func() { onManifest(mm) })
+		mm, cm := m, cloud
+		p.post(func() { onSync(mm, cm) })
 		if prefetch {
 			p.prefetch(ctx, m)
 		}
@@ -290,6 +357,21 @@ func (p *Pack) ReadyCount() int {
 
 // Dir is the pack's cache directory, for display.
 func (p *Pack) Dir() string { return p.dir }
+
+// Stats reports the core library's file count and total bytes, for the
+// welcome page's copy (the cloud tier stays on-demand and uncounted).
+func (p *Pack) Stats() (files int, bytes int64) {
+	p.mu.Lock()
+	m := p.man
+	p.mu.Unlock()
+	if m == nil {
+		return 0, 0
+	}
+	for _, f := range m.Files {
+		bytes += f.Size
+	}
+	return len(m.Files), bytes
+}
 
 // Cached reports whether a sound's bytes are on disk.
 func (p *Pack) Cached(id string) bool {
@@ -385,10 +467,7 @@ func (p *Pack) Read(id string) ([]byte, error) {
 // goroutine; concurrent calls for the same sound share one download.
 func (p *Pack) Ensure(id string, done func(ok bool)) {
 	p.mu.Lock()
-	entry, inManifest := File{}, false
-	if p.man != nil {
-		entry, inManifest = p.man.ByID(id)
-	}
+	entry, inManifest := p.fileOfLocked(id)
 	p.mu.Unlock()
 	if inManifest && p.fresh(entry) {
 		ok := true
@@ -429,35 +508,59 @@ func (p *Pack) Ensure(id string, done func(ok bool)) {
 // soundsDir is where the pack's files land, mirroring the repo layout.
 func (p *Pack) soundsDir() string { return filepath.Join(p.dir, "sounds") }
 
+// cloudDir is where the on-demand tier's files land.
+func (p *Pack) cloudDir() string { return filepath.Join(p.dir, "cloud") }
+
 // manifestPath is the cached copy of the last fetched manifest.
 func (p *Pack) manifestPath() string { return filepath.Join(p.dir, "manifest.json") }
 
+// cloudManifestPath is the cached copy of the last fetched cloud manifest
+// (stored already converted, so a reload needs no cloud schema).
+func (p *Pack) cloudManifestPath() string { return filepath.Join(p.dir, "cloud-manifest.json") }
+
 // pathOfLocked maps a sound ID to its cache path, "" when unknown.
 func (p *Pack) pathOfLocked(id string) string {
-	if p.man == nil {
-		return ""
-	}
-	f, ok := p.man.ByID(id)
+	f, ok := p.fileOfLocked(id)
 	if !ok {
 		return ""
 	}
 	return filepath.Join(p.dir, filepath.FromSlash(f.Path))
 }
 
-// fetchManifest pulls manifest.json — labels.json and sources.json when
-// they answer. fetch races every source, so one round is enough.
-func (p *Pack) fetchManifest(ctx context.Context) (*Manifest, error) {
+// fileOfLocked finds a sound's entry across both manifests, the core
+// library first — a core entry shadows a cloud duplicate of the same ID.
+// mu is held.
+func (p *Pack) fileOfLocked(id string) (File, bool) {
+	if p.man != nil {
+		if f, ok := p.man.ByID(id); ok {
+			return f, true
+		}
+	}
+	if p.cloud != nil {
+		if f, ok := p.cloud.ByID(id); ok {
+			return f, true
+		}
+	}
+	return File{}, false
+}
+
+// fetchManifest pulls manifest.json — labels.json, sources.json and the
+// cloud library's cloud-manifest.json when they answer. fetch races every
+// source, so one round is enough. The cloud manifest is optional and
+// converted on the way in; a missing one yields cloud == nil, no error.
+func (p *Pack) fetchManifest(ctx context.Context) (m *Manifest, cloud *Manifest, err error) {
 	data, err := p.fetch(ctx, "manifest.json", nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	var m Manifest
-	if err := json.Unmarshal(data, &m); err != nil {
-		return nil, fmt.Errorf("manifest: %w", err)
+	var mm Manifest
+	if err := json.Unmarshal(data, &mm); err != nil {
+		return nil, nil, fmt.Errorf("manifest: %w", err)
 	}
-	if len(m.Files) == 0 {
-		return nil, errors.New("manifest: no files")
+	if len(mm.Files) == 0 {
+		return nil, nil, errors.New("manifest: no files")
 	}
+	m = &mm
 	if ldata, err := p.fetch(ctx, "labels.json", nil); err == nil {
 		var lf struct {
 			Categories  map[string]catalog.CategoryMeta `json:"categories"`
@@ -478,7 +581,13 @@ func (p *Pack) fetchManifest(ctx context.Context) (*Manifest, error) {
 			m.Sources = sf.Sources
 		}
 	}
-	return &m, nil
+	if cdata, cerr := p.fetch(ctx, "cloud-manifest.json", nil); cerr == nil {
+		var cm cloudManifest
+		if err := json.Unmarshal(cdata, &cm); err == nil && len(cm.Files) > 0 {
+			cloud = convertCloud(&cm)
+		}
+	}
+	return m, cloud, nil
 }
 
 // prefetch quietly fills the cache. A cold start (nothing cached) takes
@@ -714,10 +823,13 @@ func (p *Pack) download(ctx context.Context, f File) error {
 	defer cancel()
 	var direct []string
 	p.mu.Lock()
-	if p.man != nil && p.man.Attribution != nil {
+	for _, m := range []*Manifest{p.man, p.cloud} {
+		if m == nil || m.Attribution == nil {
+			continue
+		}
 		if _, base, ok := strings.Cut(f.ID, "/"); ok {
-			if a := p.man.Attribution[base]; a.URL != "" {
-				direct = []string{a.URL}
+			if a := m.Attribution[base]; a.URL != "" {
+				direct = append(direct, a.URL)
 			}
 		}
 	}
@@ -758,36 +870,43 @@ func (p *Pack) store(f File, data []byte) error {
 	return nil
 }
 
-// prune removes cached files (and manifest entries' leftovers) the pack
-// no longer lists.
-func (p *Pack) prune(m *Manifest) {
+// prune removes cached files (and state entries) the pack no longer lists
+// in either manifest.
+func (p *Pack) prune(m, cloud *Manifest) {
 	keep := map[string]bool{}
 	keepID := map[string]bool{}
 	for _, f := range m.Files {
 		keep[f.Path] = true
 		keepID[f.ID] = true
 	}
-	root := p.soundsDir()
-	var paths []string
-	filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err == nil && !d.IsDir() && path != p.manifestPath() {
-			paths = append(paths, path)
+	if cloud != nil {
+		for _, f := range cloud.Files {
+			keep[f.Path] = true
+			keepID[f.ID] = true
 		}
-		return nil
-	})
+	}
 	n := 0
-	sort.Sort(sort.Reverse(sort.StringSlice(paths)))
-	for _, path := range paths {
-		rel, _ := filepath.Rel(p.dir, path)
-		if keep[filepath.ToSlash(rel)] || strings.HasSuffix(path, ".tmp") {
-			if strings.HasSuffix(path, ".tmp") {
-				os.Remove(path)
+	for _, root := range []string{p.soundsDir(), p.cloudDir()} {
+		var paths []string
+		filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err == nil && !d.IsDir() {
+				paths = append(paths, path)
+			}
+			return nil
+		})
+		sort.Sort(sort.Reverse(sort.StringSlice(paths)))
+		for _, path := range paths {
+			rel, _ := filepath.Rel(p.dir, path)
+			if keep[filepath.ToSlash(rel)] || strings.HasSuffix(path, ".tmp") {
+				if strings.HasSuffix(path, ".tmp") {
+					os.Remove(path)
+					n++
+				}
+				continue
+			}
+			if os.Remove(path) == nil {
 				n++
 			}
-			continue
-		}
-		if os.Remove(path) == nil {
-			n++
 		}
 	}
 	// State entries follow their files out.
@@ -808,9 +927,15 @@ func (p *Pack) prune(m *Manifest) {
 	}
 }
 
-// loadCachedManifest reads the manifest saved by an earlier run.
+// loadCachedManifest reads the core manifest saved by an earlier run.
 func (p *Pack) loadCachedManifest() (*Manifest, error) {
-	data, err := os.ReadFile(p.manifestPath())
+	return p.readManifest(p.manifestPath())
+}
+
+// readManifest parses a cached manifest copy; the cloud cache holds the
+// converted internal shape, so the same reader serves both.
+func (p *Pack) readManifest(path string) (*Manifest, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -819,6 +944,15 @@ func (p *Pack) loadCachedManifest() (*Manifest, error) {
 		return nil, err
 	}
 	return &m, nil
+}
+
+// cacheManifest writes a manifest copy for offline starts.
+func (p *Pack) cacheManifest(path string, m *Manifest) error {
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
 }
 
 // client is the shared HTTP client (lazily built, like http.DefaultClient

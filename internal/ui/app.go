@@ -108,6 +108,14 @@ func Main(cx *core.Scope, deps Deps) core.Node {
 					pack:   deps.Pack,
 					ready:  a.packReady.Get,
 					failed: a.packFailed.Get,
+					stats: func() (sounds, cats, scenes int, bytes int64) {
+						if deps.Pack != nil {
+							sounds, bytes = deps.Pack.Stats()
+						}
+						cats = len(deps.Catalog.Cats)
+						scenes = len(catalog.BuiltinPresets())
+						return
+					},
 					onRetry: func() {
 						a.packFailed.Set(false)
 						a.startPack(false)
@@ -130,15 +138,17 @@ var appBackground = core.Style{
 	},
 }
 
-// startPack fetches the manifest and syncs the catalog to it — added,
-// renamed and removed sounds all land — prefetching after (unless the
-// welcome dialog owns the first fill). It is re-runnable: the welcome
-// dialog's retry calls it again after a failure.
+// startPack fetches both manifests and syncs the catalog to them — added,
+// renamed and removed sounds all land, the cloud tier joining the core
+// categories flagged Cloud — prefetching the core library after (unless
+// the welcome dialog owns the first fill; cloud sounds never prefetch).
+// It is re-runnable: the welcome dialog's retry calls it again after a
+// failure.
 func (a *app) startPack(prefetch bool) {
 	if a.deps.Pack == nil {
 		return
 	}
-	a.deps.Pack.Start(func(m *pack.Manifest) {
+	a.deps.Pack.Start(func(m, cloud *pack.Manifest) {
 		sounds := make([]catalog.Sound, 0, len(m.Files))
 		for _, f := range m.Files {
 			s := catalog.SoundFromID(f.ID)
@@ -147,7 +157,24 @@ func (a *app) startPack(prefetch bool) {
 			}
 			sounds = append(sounds, s)
 		}
+		if cloud != nil {
+			for _, f := range cloud.Files {
+				s := catalog.SoundFromID(f.ID)
+				if _, base, _ := strings.Cut(f.ID, "/"); cloud.Labels[base] != "" {
+					s.Label = cloud.Labels[base]
+				}
+				s.Cloud = true
+				sounds = append(sounds, s)
+			}
+		}
 		removed := a.deps.Catalog.SyncAll(sounds)
+		// The core manifest's metadata wins where both describe a
+		// category; apply the cloud's first.
+		if cloud != nil {
+			for id, cm := range cloud.Categories {
+				a.deps.Catalog.SetCategoryMeta(id, cm.Title, cm.Emoji)
+			}
+		}
 		for id, cm := range m.Categories {
 			a.deps.Catalog.SetCategoryMeta(id, cm.Title, cm.Emoji)
 		}
