@@ -7,5 +7,6 @@ dist/
 .beads-credential-key
 /.beads
 /.claude
+/.trae
 CLAUDE.md
 AGENTS.md
