@@ -37,18 +37,24 @@ import (
 )
 
 // source is one place the pack is served from: raw is the base URL under
-// which manifest.json, labels.json and the files' Paths live; archive, when
-// set, serves the whole repository as a zip (gitee's repository/archive
-// endpoint, GitHub's codeload), which a cold start fetches in one request.
+// which manifest.json, labels.json and the core files' Paths live (the
+// repository's master branch); cloudRaw is the cloud branch's raw base,
+// where cloud-manifest.json and the on-demand tier's files live — the
+// branch split keeps the master zip a pure core download. archive, when
+// set, serves the whole master branch as a zip (gitee's
+// repository/archive endpoint, GitHub's codeload), which a cold start
+// fetches in one request.
 type source struct {
-	raw     string
-	archive string
+	raw      string
+	cloudRaw string
+	archive  string
 }
 
 // Sources are the places the pack is served from. gitee first (no mirror
 // needed in mainland China), GitHub behind it. VIBE_PACK_SOURCES
 // (comma-separated) overrides the raw URLs, for mirrors and local testing;
-// such sources have no archive and fall back to file-by-file.
+// such a source serves both branches from one root and has no archive,
+// falling back to file-by-file.
 var Sources = defaultSources()
 
 func defaultSources() []source {
@@ -56,7 +62,7 @@ func defaultSources() []source {
 		var out []source
 		for _, part := range strings.Split(env, ",") {
 			if p := strings.TrimSpace(part); p != "" {
-				out = append(out, source{raw: p})
+				out = append(out, source{raw: p, cloudRaw: p})
 			}
 		}
 		if len(out) > 0 {
@@ -70,9 +76,10 @@ func defaultSources() []source {
 	// behind risk-control captcha pages and stays off.
 	const repo = "limengwei/vibe-time-sound"
 	raw := "https://raw.githubusercontent.com/" + repo + "/master"
+	cloudRaw := "https://raw.githubusercontent.com/" + repo + "/cloud"
 	zip := "https://github.com/" + repo + "/archive/refs/heads/master.zip"
 	mirror := func(base string) source {
-		return source{raw: base + "/" + raw, archive: base + "/" + zip}
+		return source{raw: base + "/" + raw, cloudRaw: base + "/" + cloudRaw, archive: base + "/" + zip}
 	}
 	return []source{
 		mirror("https://gh-proxy.com"),
@@ -82,8 +89,8 @@ func defaultSources() []source {
 		mirror("https://gh.llkk.cc"),
 		mirror("https://hub.gitmirror.com"),
 		mirror("https://ghproxy.homeboyc.cn"),
-		{raw: raw, archive: "https://codeload.github.com/" + repo + "/zip/refs/heads/master"},
-		{raw: "https://gitee.com/limengwe/vibe-time-sound/raw/master"},
+		{raw: raw, cloudRaw: cloudRaw, archive: "https://codeload.github.com/" + repo + "/zip/refs/heads/master"},
+		{raw: "https://gitee.com/limengwe/vibe-time-sound/raw/master", cloudRaw: "https://gitee.com/limengwe/vibe-time-sound/raw/cloud"},
 	}
 }
 
@@ -549,7 +556,7 @@ func (p *Pack) fileOfLocked(id string) (File, bool) {
 // source, so one round is enough. The cloud manifest is optional and
 // converted on the way in; a missing one yields cloud == nil, no error.
 func (p *Pack) fetchManifest(ctx context.Context) (m *Manifest, cloud *Manifest, err error) {
-	data, err := p.fetch(ctx, "manifest.json", nil)
+	data, err := p.fetch(ctx, "manifest.json", nil, false)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -561,7 +568,7 @@ func (p *Pack) fetchManifest(ctx context.Context) (m *Manifest, cloud *Manifest,
 		return nil, nil, errors.New("manifest: no files")
 	}
 	m = &mm
-	if ldata, err := p.fetch(ctx, "labels.json", nil); err == nil {
+	if ldata, err := p.fetch(ctx, "labels.json", nil, false); err == nil {
 		var lf struct {
 			Categories  map[string]catalog.CategoryMeta `json:"categories"`
 			Labels      map[string]string               `json:"labels"`
@@ -573,7 +580,7 @@ func (p *Pack) fetchManifest(ctx context.Context) (m *Manifest, cloud *Manifest,
 	}
 	// sources.json is optional: the repository hands down extra raw
 	// sources here, swappable without a client release.
-	if sdata, err := p.fetch(ctx, "sources.json", nil); err == nil {
+	if sdata, err := p.fetch(ctx, "sources.json", nil, false); err == nil {
 		var sf struct {
 			Sources []string `json:"sources"`
 		}
@@ -581,7 +588,7 @@ func (p *Pack) fetchManifest(ctx context.Context) (m *Manifest, cloud *Manifest,
 			m.Sources = sf.Sources
 		}
 	}
-	if cdata, cerr := p.fetch(ctx, "cloud-manifest.json", nil); cerr == nil {
+	if cdata, cerr := p.fetch(ctx, "cloud-manifest.json", nil, true); cerr == nil {
 		var cm cloudManifest
 		if err := json.Unmarshal(cdata, &cm); err == nil && len(cm.Files) > 0 {
 			cloud = convertCloud(&cm)
@@ -754,20 +761,31 @@ func (p *Pack) fetchArchiveFrom(ctx context.Context, url string, m *Manifest, on
 // attribution link): the first healthy answer wins, and cancelling the
 // context it returns with stops the stragglers. A response that is not a
 // 200, or is an HTML page (a mirror's error or risk-control answer),
-// loses its heat.
-func (p *Pack) fetch(ctx context.Context, rel string, direct []string) ([]byte, error) {
+// loses its heat. A cloud fetch (the on-demand tier's manifest and files)
+// races the sources' cloud-branch raw bases instead; the repo-delivered
+// sources serve master.
+func (p *Pack) fetch(ctx context.Context, rel string, direct []string, cloud bool) ([]byte, error) {
 	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	p.mu.Lock()
-	bases := append([]string{}, p.extraRaw...)
-	p.mu.Unlock()
-	urls := make([]string, 0, len(bases)+len(Sources)+len(direct))
+	var bases []string
+	if cloud {
+		for _, src := range Sources {
+			if src.cloudRaw != "" {
+				bases = append(bases, src.cloudRaw)
+			}
+		}
+	} else {
+		p.mu.Lock()
+		bases = append(bases, p.extraRaw...)
+		p.mu.Unlock()
+		for _, src := range Sources {
+			bases = append(bases, src.raw)
+		}
+	}
+	urls := make([]string, 0, len(bases)+len(direct))
 	for _, b := range bases {
 		urls = append(urls, strings.TrimRight(b, "/")+"/"+rel)
-	}
-	for _, src := range Sources {
-		urls = append(urls, strings.TrimRight(src.raw, "/")+"/"+rel)
 	}
 	urls = append(urls, direct...)
 
@@ -834,7 +852,9 @@ func (p *Pack) download(ctx context.Context, f File) error {
 		}
 	}
 	p.mu.Unlock()
-	data, err := p.fetch(cctx, f.Path, direct)
+	// Cloud files live on the repository's cloud branch; core files on
+	// master. The path tells them apart.
+	data, err := p.fetch(cctx, f.Path, direct, strings.HasPrefix(f.Path, "cloud/"))
 	if err != nil {
 		return err
 	}

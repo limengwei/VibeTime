@@ -95,7 +95,7 @@ func newPack(t *testing.T, sources ...string) *Pack {
 	old := Sources
 	Sources = make([]source, len(sources))
 	for i, s := range sources {
-		Sources[i] = source{raw: s}
+		Sources[i] = source{raw: s, cloudRaw: s}
 	}
 	t.Cleanup(func() { Sources = old })
 	p, err := openAt(filepath.Join(t.TempDir(), "pack"), syncPost, bgCtx)
@@ -123,6 +123,13 @@ func manifestJSON(t *testing.T, version int, files []File) string {
 type cloudEntry struct {
 	File
 	title, license, origin string
+}
+
+// cloudFileEntry builds a cloud-tier File: its path lives under cloud/,
+// on the repository's cloud branch.
+func cloudFileEntry(id, data string) File {
+	sum := sha256.Sum256([]byte(data))
+	return File{ID: id, Path: "cloud/" + id + ".mp3", Size: int64(len(data)), SHA256: hex.EncodeToString(sum[:])}
 }
 
 // cloudJSON marshals a cloud-manifest.json wire document.
@@ -394,7 +401,7 @@ func TestCloudManifestConvertAndCache(t *testing.T) {
 	p := newPack(t, srv.URL)
 
 	a := entry("cat/a", "A")
-	ce := cloudEntry{File: entry("cat/c", "CCC"), title: "丙", license: "CC-BY", origin: "https://example.org/set"}
+	ce := cloudEntry{File: cloudFileEntry("cat/c", "CCC"), title: "丙", license: "CC-BY", origin: "https://example.org/set"}
 	repo.set("manifest.json", manifestJSON(t, 1, []File{a}))
 	repo.set(a.Path, "A")
 	repo.set("cloud-manifest.json", cloudJSON(t, 1, []cloudEntry{ce}))
@@ -431,7 +438,7 @@ func TestCloudOnDemandOnly(t *testing.T) {
 	p := newPack(t, srv.URL)
 
 	a := entry("cat/a", "A")
-	ce := cloudEntry{File: entry("cat/c", "CCC"), title: "丙"}
+	ce := cloudEntry{File: cloudFileEntry("cat/c", "CCC"), title: "丙"}
 	repo.set("manifest.json", manifestJSON(t, 1, []File{a}))
 	repo.set(a.Path, "A")
 	repo.set("cloud-manifest.json", cloudJSON(t, 1, []cloudEntry{ce}))
@@ -471,8 +478,8 @@ func TestCloudPrune(t *testing.T) {
 	p := newPack(t, srv.URL)
 
 	a := entry("cat/a", "A")
-	ce := cloudEntry{File: entry("cat/c", "CCC"), title: "丙"}
-	next := cloudEntry{File: entry("cat/d", "DDD"), title: "丁"}
+	ce := cloudEntry{File: cloudFileEntry("cat/c", "CCC"), title: "丙"}
+	next := cloudEntry{File: cloudFileEntry("cat/d", "DDD"), title: "丁"}
 	repo.set("manifest.json", manifestJSON(t, 1, []File{a}))
 	repo.set(a.Path, "A")
 	repo.set("cloud-manifest.json", cloudJSON(t, 1, []cloudEntry{ce}))
@@ -497,6 +504,51 @@ func TestCloudPrune(t *testing.T) {
 	}
 }
 
+// TestCloudBranchSources covers the repository's branch split: the core
+// library is served from master, the on-demand tier from the cloud
+// branch, and no request crosses the line.
+func TestCloudBranchSources(t *testing.T) {
+	master, cloudRepo := newFakeRepo(), newFakeRepo()
+	masterSrv, cloudSrv := serveRepo(t, master), serveRepo(t, cloudRepo)
+
+	a := entry("cat/a", "A")
+	ce := cloudEntry{File: cloudFileEntry("cat/c", "CCC"), title: "丙"}
+	master.set("manifest.json", manifestJSON(t, 1, []File{a}))
+	master.set(a.Path, "A")
+	cloudRepo.set("cloud-manifest.json", cloudJSON(t, 1, []cloudEntry{ce}))
+	cloudRepo.set(ce.Path, "CCC")
+
+	old := Sources
+	Sources = []source{{raw: masterSrv.URL, cloudRaw: cloudSrv.URL}}
+	t.Cleanup(func() { Sources = old })
+
+	p, err := openAt(filepath.Join(t.TempDir(), "pack"), syncPost, bgCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clouds := make(chan *Manifest, 2)
+	p.Start(func(_, cloud *Manifest) { clouds <- cloud }, true, nil)
+	if cloud := <-clouds; cloud == nil || len(cloud.Files) != 1 {
+		t.Fatalf("cloud manifest not fetched from the cloud branch: %v", cloud)
+	}
+	waitFor(t, func() bool { return p.fresh(a) }, "core file downloaded from master")
+	if master.hitsFor("cloud-manifest.json") != 0 {
+		t.Fatal("master was asked for the cloud manifest")
+	}
+
+	done := make(chan bool, 1)
+	p.Ensure(ce.ID, func(ok bool) { done <- ok })
+	if ok := <-done; !ok {
+		t.Fatal("Ensure failed for the cloud sound")
+	}
+	if cloudRepo.hitsFor(ce.Path) == 0 {
+		t.Fatal("cloud file not fetched from the cloud branch")
+	}
+	if master.hitsFor(ce.Path) != 0 {
+		t.Fatal("master was asked for a cloud file")
+	}
+}
+
 // TestCloudOfflineRestore covers an offline restart: both manifests come
 // back from the local copies, before any request can answer.
 func TestCloudOfflineRestore(t *testing.T) {
@@ -505,7 +557,7 @@ func TestCloudOfflineRestore(t *testing.T) {
 	p := newPack(t, srv.URL)
 
 	a := entry("cat/a", "A")
-	ce := cloudEntry{File: entry("cat/c", "CCC"), title: "丙"}
+	ce := cloudEntry{File: cloudFileEntry("cat/c", "CCC"), title: "丙"}
 	repo.set("manifest.json", manifestJSON(t, 1, []File{a}))
 	repo.set(a.Path, "A")
 	repo.set("cloud-manifest.json", cloudJSON(t, 1, []cloudEntry{ce}))
