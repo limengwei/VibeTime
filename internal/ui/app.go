@@ -195,11 +195,11 @@ func presetCard(a *app, p catalog.Preset) core.Node {
 	if !p.Builtin {
 		editRight = core.Pt(50)
 		children = append(children,
-			cardAction("✎", "编辑", core.Pt(6), func() {
+			cardAction(iconPencil, "编辑", core.Pt(6), func() {
 				a.editorID.Set(p.ID)
 				a.editorOpen.Set(true)
 			}),
-			cardAction("✕", "删除", core.Pt(28), func() {
+			cardAction(iconX, "删除", core.Pt(28), func() {
 				if i := a.deps.Store.FindCustom(p.ID); i >= 0 {
 					a.deps.Store.Custom = append(a.deps.Store.Custom[:i], a.deps.Store.Custom[i+1:]...)
 					_ = a.deps.Store.Save()
@@ -211,7 +211,7 @@ func presetCard(a *app, p catalog.Preset) core.Node {
 			}),
 		)
 	}
-	children = append(children, cardAction("⇪", "分享", editRight, func() {
+	children = append(children, cardAction(iconShare, "分享", editRight, func() {
 		a.openShare(p)
 	}))
 	return ui.Press{
@@ -244,7 +244,7 @@ func presetCard(a *app, p catalog.Preset) core.Node {
 }
 
 // cardAction is a small absolute corner button on custom cards.
-func cardAction(glyph, label string, right core.Length, onPress func()) core.Node {
+func cardAction(svg *core.SVG, label string, right core.Length, onPress func()) core.Node {
 	return core.View{
 		OnPress: func(core.PressEvent) { onPress() },
 		NoFocus: true,
@@ -257,7 +257,7 @@ func cardAction(glyph, label string, right core.Length, onPress func()) core.Nod
 		StyleFunc: func() core.Style {
 			return core.Style{Hover: &core.Style{Background: core.RGBA(0xffffff, 0.1)}}
 		},
-		Children: []core.Node{core.Text{Content: glyph, Style: core.Style{FontSize: 11, Color: core.RGBA(0xffffff, 0.35)}}},
+		Children: []core.Node{core.Icon{SVG: svg, Style: core.Style{Width: core.Pt(12), Height: core.Pt(12), Color: core.RGBA(0xffffff, 0.35)}}},
 	}
 }
 
@@ -278,7 +278,7 @@ func addCard(a *app) core.Node {
 			return core.Style{Hover: &core.Style{Background: core.RGBA(0x8b5cf6, 0.06), BorderColor: core.RGBA(0x8b5cf6, 0.4)}}
 		},
 		Children: []core.Node{core.View{Class: "flex-col items-center gap-1", Children: []core.Node{
-			core.Text{Content: "＋", Style: core.Style{FontSize: 26, Color: core.RGBA(0xffffff, 0.25)}},
+			core.Icon{SVG: iconPlus, Style: core.Style{Width: core.Pt(26), Height: core.Pt(26), Color: core.RGBA(0xffffff, 0.25)}},
 			core.Text{Content: "添加场景", Style: core.Style{FontSize: 13, FontWeight: core.FontWeightMedium, Color: core.RGBA(0xffffff, 0.85)}},
 			core.Text{Content: "自定义声音组合", Style: core.Style{FontSize: 11, Color: core.RGBA(0xffffff, 0.3)}},
 		}}},
@@ -302,7 +302,7 @@ func importCard(a *app) core.Node {
 			return core.Style{Hover: &core.Style{Background: core.RGBA(0x8b5cf6, 0.06), BorderColor: core.RGBA(0x8b5cf6, 0.4)}}
 		},
 		Children: []core.Node{core.View{Class: "flex-col items-center gap-1", Children: []core.Node{
-			core.Text{Content: "⇩", Style: core.Style{FontSize: 24, Color: core.RGBA(0xffffff, 0.25)}},
+			core.Icon{SVG: iconDown, Style: core.Style{Width: core.Pt(24), Height: core.Pt(24), Color: core.RGBA(0xffffff, 0.25)}},
 			core.Text{Content: "导入配方", Style: core.Style{FontSize: 13, FontWeight: core.FontWeightMedium, Color: core.RGBA(0xffffff, 0.85)}},
 			core.Text{Content: "粘贴配方码", Style: core.Style{FontSize: 11, Color: core.RGBA(0xffffff, 0.3)}},
 		}}},
@@ -410,14 +410,14 @@ func footer(cx *core.Scope, a *app) core.Node {
 						return core.Style{Hover: &core.Style{Background: core.RGBA(0xff5050, 0.25), BorderColor: core.RGBA(0xff5050, 0.3)}}
 					},
 					Children: []core.Node{
-						core.Text{Content: "■", Style: core.Style{FontSize: 10, Color: core.RGBA(0xff7878, 0.9)}},
+						core.Icon{SVG: iconStop, Style: core.Style{Width: core.Pt(12), Height: core.Pt(12), Color: core.RGBA(0xff7878, 0.9)}},
 						core.Text{Content: "全部停止", Style: core.Style{FontSize: 12, Color: core.RGBA(0xff7878, 0.9)}},
 					},
 				}
 			}},
 			// Right: master volume + focus.
 			core.View{Class: "flex-row items-center justify-end gap-2", Style: core.Style{FlexGrow: 1}, Children: []core.Node{
-				core.Text{Content: "🔊", Style: core.Style{FontSize: 13, Color: core.RGBA(0xffffff, 0.4)}},
+				core.Icon{SVG: iconVolume, Style: core.Style{Width: core.Pt(16), Height: core.Pt(16), Color: core.RGBA(0xffffff, 0.4)}},
 				ui.Slider{
 					Min: 0, Max: 1, Step: 0.01,
 					Value:    a.master.Get,
@@ -449,7 +449,7 @@ func focusButton(a *app) core.Node {
 			}
 			return core.Style{Hover: &core.Style{Background: core.RGBA(0x8b5cf6, 0.2), BorderColor: core.RGBA(0x8b5cf6, 0.4)}}
 		},
-		Children: []core.Node{core.Text{Content: "⏱", Style: core.Style{FontSize: 15}}},
+		Children: []core.Node{core.Icon{SVG: iconClock, Style: core.Style{Width: core.Pt(16), Height: core.Pt(16), Color: core.RGBA(0xffffff, 0.7)}}},
 	}
 }
 

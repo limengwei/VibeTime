@@ -158,14 +158,14 @@ func focusView(cx *core.Scope, a *app) core.Node {
 				timerDisplay(duration, remaining),
 				core.Show{When: func() bool { return running.Get() && !panelOpen.Get() }, Then: func(cx *core.Scope) core.Node {
 					return core.View{Class: "flex-row gap-4", Children: []core.Node{
-						roundButton(func() string {
+						roundButton(func() *core.SVG {
 							if paused.Get() {
-								return "▶"
+								return iconPlay
 							}
-							return "⏸"
+							return iconPause
 						}, "暂停/继续", togglePause),
-						roundButton(func() string { return "■" }, "停止专注", exit, danger),
-						roundButton(func() string { return "⚙" }, "专注设置", func() { panelOpen.Set(true) }),
+						roundButton(func() *core.SVG { return iconStop }, "停止专注", exit, danger),
+						roundButton(func() *core.SVG { return iconGear }, "专注设置", func() { panelOpen.Set(true) }),
 					}}
 				}},
 			}},
@@ -227,11 +227,13 @@ func timerDisplay(duration *core.Signal[int], remaining *core.Signal[int]) core.
 
 // roundButton is a glassy circular control; NoFocus keeps Space free for the
 // pause shortcut (focused buttons would take it).
-func roundButton(glyph func() string, label string, onPress func(), mods ...func(*core.Style)) core.Node {
+func roundButton(icon func() *core.SVG, label string, onPress func(), mods ...func(*core.Style)) core.Node {
 	style := core.Style{
-		Width: core.Pt(48), Height: core.Pt(48), CornerRadius: 24,
-		Background:  core.RGBA(0xffffff, 0.1),
-		BorderColor: core.RGBA(0xffffff, 0.2), BorderWidth: 1,
+		Width:        core.Pt(48),
+		Height:       core.Pt(48),
+		CornerRadius: 24,
+		Background:   core.RGBA(0xffffff, 0.1),
+		BorderColor:  core.RGBA(0xffffff, 0.2), BorderWidth: 1,
 		AlignItems: core.AlignCenter, JustifyContent: core.JustifyCenter,
 	}
 	for _, m := range mods {
@@ -245,7 +247,7 @@ func roundButton(glyph func() string, label string, onPress func(), mods ...func
 		StyleFunc: func() core.Style {
 			return core.Style{Hover: &core.Style{Background: core.RGBA(0xffffff, 0.2), BorderColor: core.RGBA(0xffffff, 0.3)}}
 		},
-		Children: []core.Node{core.Text{ContentFunc: glyph, Style: core.Style{FontSize: 18, Color: core.RGBA(0xffffff, 0.8)}}},
+		Children: []core.Node{core.Icon{SVGFunc: icon, Style: core.Style{Width: core.Pt(20), Height: core.Pt(20), Color: core.RGBA(0xffffff, 0.8)}}},
 	}
 }
 

@@ -101,9 +101,9 @@ func presetEditor(cx *core.Scope, a *app) core.Node {
 								}, Children: []core.Node{
 									core.Text{ContentFunc: e.icon.Get, Style: core.Style{FontSize: 20}},
 								}},
-								ui.Button{Text: "🎲", Label: "随机图标", OnPress: func() {
+								ui.Button{Icon: func() *core.SVG { return iconDice }, Label: "随机图标", OnPress: func() {
 									e.icon.Set(randomIcon())
-								}, Style: core.Style{Width: core.Pt(38), Height: core.Pt(38)}},
+								}, Style: core.Style{Width: core.Pt(38), Height: core.Pt(38)}, IconSize: 16},
 							}},
 						}},
 						core.View{Class: "flex-col gap-1 flex-1 min-w-0", Children: []core.Node{
@@ -301,7 +301,7 @@ func (e *editor) selectedTags() core.Node {
 					StyleFunc: func() core.Style {
 						return core.Style{Hover: &core.Style{Background: core.RGBA(0xffffff, 0.1)}}
 					},
-					Children: []core.Node{core.Text{Content: "✕", Style: core.Style{FontSize: 10, Color: core.RGBA(0xffffff, 0.3)}}},
+					Children: []core.Node{core.Icon{SVG: iconX, Style: core.Style{Width: core.Pt(10), Height: core.Pt(10), Color: core.RGBA(0xffffff, 0.3)}}},
 				},
 			},
 		})
