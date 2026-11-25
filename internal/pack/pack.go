@@ -235,26 +235,25 @@ func openAt(dir string, post func(func()), ctxFn func() context.Context) (*Pack,
 	return p, nil
 }
 
-// Start fetches both manifests (falling back to the cached copies
-// offline), reports them together on the app's goroutine, prunes files
-// the pack dropped, then prefetches whatever is missing in the
-// background — unless prefetch is false, when the welcome page's Download
-// owns the first fill instead. The prefetch and the whole-repository zip
-// cover the core library only; cloud sounds stay on-demand.
+// Start delivers the core manifest first — the cached cloud manifest, if
+// any, rides along so the sound picker never waits on the cloud branch —
+// then refreshes the cloud manifest in the background and finally
+// prefetches whatever is missing. When the fresh cloud list lands it
+// replaces the cache and onSync runs again with it; a cloud fetch that
+// fails just keeps the cache. Only the core manifest failing with no
+// cache at all runs onFail instead; calling Start again retries.
 //
-// cloud is nil when the repository has no cloud library (or none could be
-// fetched and none is cached) — that is logged, not a failure. With no
-// core manifest to fall back to either (a first launch offline), onFail
-// runs instead of onSync; calling Start again retries.
+// The prefetch and the whole-repository zip cover the core library only;
+// cloud sounds stay on-demand.
 func (p *Pack) Start(onSync func(main, cloud *Manifest), prefetch bool, onFail func()) {
 	go func() {
 		ctx := p.ctxFn()
-		m, cloud, err := p.fetchManifest(ctx)
+		m, err := p.fetchCore(ctx)
 		if err != nil {
 			log.Printf("[pack] manifest 拉取失败（使用本地缓存）: %v", err)
 			p.mu.Lock()
 			m = p.man
-			cloud = p.cloud
+			cloud := p.cloud
 			p.mu.Unlock()
 			if m == nil {
 				if onFail != nil {
@@ -262,24 +261,39 @@ func (p *Pack) Start(onSync func(main, cloud *Manifest), prefetch bool, onFail f
 				}
 				return
 			}
+			mm, cm := m, cloud
+			p.post(func() { onSync(mm, cm) })
+			return
+		}
+		if err := p.cacheManifest(p.manifestPath(), m); err != nil {
+			log.Printf("[pack] manifest 缓存写入失败: %v", err)
+		}
+		p.mu.Lock()
+		p.man = m
+		p.extraRaw = m.Sources
+		cloud := p.cloud // the cached copy goes out first; the fresh one follows
+		p.mu.Unlock()
+		p.prune(m, cloud)
+		mm, cm := m, cloud
+		p.post(func() { onSync(mm, cm) })
+
+		// The cloud tier loads behind the picker's first paint: a slow or
+		// missing cloud branch never blocks the core list.
+		if fresh, ferr := p.fetchCloud(ctx); ferr != nil {
+			log.Printf("[pack] 云清单拉取失败（沿用本地缓存）: %v", ferr)
 		} else {
-			if err := p.cacheManifest(p.manifestPath(), m); err != nil {
-				log.Printf("[pack] manifest 缓存写入失败: %v", err)
-			}
-			if cloud != nil {
-				if err := p.cacheManifest(p.cloudManifestPath(), cloud); err != nil {
+			if fresh != nil {
+				if err := p.cacheManifest(p.cloudManifestPath(), fresh); err != nil {
 					log.Printf("[pack] 云清单缓存写入失败: %v", err)
 				}
 			}
 			p.mu.Lock()
-			p.man = m
-			p.cloud = cloud
-			p.extraRaw = m.Sources
+			p.cloud = fresh
 			p.mu.Unlock()
-			p.prune(m, cloud)
+			p.prune(m, fresh)
+			p.post(func() { onSync(m, fresh) })
 		}
-		mm, cm := m, cloud
-		p.post(func() { onSync(mm, cm) })
+
 		if prefetch {
 			p.prefetch(ctx, m)
 		}
@@ -551,23 +565,20 @@ func (p *Pack) fileOfLocked(id string) (File, bool) {
 	return File{}, false
 }
 
-// fetchManifest pulls manifest.json — labels.json, sources.json and the
-// cloud library's cloud-manifest.json when they answer. fetch races every
-// source, so one round is enough. The cloud manifest is optional and
-// converted on the way in; a missing one yields cloud == nil, no error.
-func (p *Pack) fetchManifest(ctx context.Context) (m *Manifest, cloud *Manifest, err error) {
+// fetchCore pulls manifest.json — labels.json and sources.json when they
+// answer. fetch races every source, so one round is enough.
+func (p *Pack) fetchCore(ctx context.Context) (*Manifest, error) {
 	data, err := p.fetch(ctx, "manifest.json", nil, false)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	var mm Manifest
-	if err := json.Unmarshal(data, &mm); err != nil {
-		return nil, nil, fmt.Errorf("manifest: %w", err)
+	var m Manifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, fmt.Errorf("manifest: %w", err)
 	}
-	if len(mm.Files) == 0 {
-		return nil, nil, errors.New("manifest: no files")
+	if len(m.Files) == 0 {
+		return nil, errors.New("manifest: no files")
 	}
-	m = &mm
 	if ldata, err := p.fetch(ctx, "labels.json", nil, false); err == nil {
 		var lf struct {
 			Categories  map[string]catalog.CategoryMeta `json:"categories"`
@@ -588,13 +599,26 @@ func (p *Pack) fetchManifest(ctx context.Context) (m *Manifest, cloud *Manifest,
 			m.Sources = sf.Sources
 		}
 	}
-	if cdata, cerr := p.fetch(ctx, "cloud-manifest.json", nil, true); cerr == nil {
-		var cm cloudManifest
-		if err := json.Unmarshal(cdata, &cm); err == nil && len(cm.Files) > 0 {
-			cloud = convertCloud(&cm)
-		}
+	return &m, nil
+}
+
+// fetchCloud pulls the cloud branch's cloud-manifest.json and converts
+// it. A repository without a cloud library answers 404 — an error, which
+// keeps the cached copy; an explicitly empty one returns nil, retiring
+// the tier.
+func (p *Pack) fetchCloud(ctx context.Context) (*Manifest, error) {
+	data, err := p.fetch(ctx, "cloud-manifest.json", nil, true)
+	if err != nil {
+		return nil, err
 	}
-	return m, cloud, nil
+	var cm cloudManifest
+	if err := json.Unmarshal(data, &cm); err != nil {
+		return nil, fmt.Errorf("cloud manifest: %w", err)
+	}
+	if len(cm.Files) == 0 {
+		return nil, nil
+	}
+	return convertCloud(&cm), nil
 }
 
 // prefetch quietly fills the cache. A cold start (nothing cached) takes

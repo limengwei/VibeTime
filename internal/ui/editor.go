@@ -250,6 +250,7 @@ func (e *editor) preview(id string) {
 		if !e.closed && !e.saved {
 			a.deps.Engine.Play(id, e.selected[id])
 		}
+		a.bumpRefresh() // the chip's cloud badge leaves with the download
 		e.bumpSel()
 	})
 }
@@ -400,10 +401,10 @@ func (e *editor) categoryGroups() []core.Node {
 		chips := make([]core.Node, 0, len(cat.Sounds))
 		for _, s := range cat.Sounds {
 			s := s
-			// A cloud sound's chip carries a small ☁ beside its label,
-			// the one visible difference of the on-demand tier.
+			// A cloud sound's chip carries a small ☁ until its bytes
+			// land locally — then it is just another local sound.
 			chipChildren := []core.Node{core.Text{Content: s.Label, Style: core.Style{FontSize: 12}}}
-			if s.Cloud {
+			if s.Cloud && (e.a.deps.Pack == nil || !e.a.deps.Pack.Cached(s.ID)) {
 				chipChildren = []core.Node{core.View{Class: "flex-row items-center gap-1", Children: []core.Node{
 					core.Text{Content: s.Label, Style: core.Style{FontSize: 12}},
 					core.Text{Content: "☁", Style: core.Style{FontSize: 10, Color: core.RGBA(0xffffff, 0.35)}},

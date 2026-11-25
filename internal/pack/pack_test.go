@@ -394,7 +394,8 @@ func TestAttributionDirectURL(t *testing.T) {
 // TestCloudManifestConvertAndCache covers the cloud tier's arrival: the
 // wire document converts into the internal manifest shape (titles as
 // labels, license/origin as attribution), the copy is cached, and nothing
-// downloads until asked.
+// downloads until asked. It arrives after the core delivery, in the
+// background.
 func TestCloudManifestConvertAndCache(t *testing.T) {
 	repo := newFakeRepo()
 	srv := serveRepo(t, repo)
@@ -407,10 +408,18 @@ func TestCloudManifestConvertAndCache(t *testing.T) {
 	repo.set("cloud-manifest.json", cloudJSON(t, 1, []cloudEntry{ce}))
 	repo.set(ce.Path, "CCC")
 
-	clouds := make(chan *Manifest, 2)
-	p.Start(func(_, cloud *Manifest) { clouds <- cloud }, true, nil)
-	cloud := <-clouds
-	if cloud == nil || len(cloud.Files) != 1 {
+	p.Start(func(m, _ *Manifest) {}, true, nil)
+	waitFor(t, func() bool { return p.fresh(a) }, "core file downloaded")
+	waitFor(t, func() bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.cloud != nil
+	}, "cloud manifest arrived in the background")
+
+	p.mu.Lock()
+	cloud := p.cloud
+	p.mu.Unlock()
+	if len(cloud.Files) != 1 {
 		t.Fatalf("cloud manifest = %+v", cloud)
 	}
 	if cloud.Labels["c"] != "丙" {
@@ -419,7 +428,6 @@ func TestCloudManifestConvertAndCache(t *testing.T) {
 	if cloud.Attribution["c"].License != "CC-BY" || cloud.Attribution["c"].Origin != "https://example.org/set" {
 		t.Fatalf("attribution not converted: %v", cloud.Attribution)
 	}
-	waitFor(t, func() bool { return p.fresh(a) }, "core file downloaded")
 
 	// The cloud tier stays on the shelf: bytes only when asked.
 	if fileExists(diskPath(p.dir, ce.File)) {
@@ -446,6 +454,11 @@ func TestCloudOnDemandOnly(t *testing.T) {
 
 	p.Start(func(m, _ *Manifest) {}, true, nil)
 	waitFor(t, func() bool { return p.fresh(a) }, "core file downloaded")
+	waitFor(t, func() bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.cloud != nil
+	}, "cloud manifest arrived")
 
 	if n := repo.hitsFor(ce.Path); n != 0 {
 		t.Fatalf("cloud sound requested during prefetch: %d hits", n)
@@ -487,6 +500,11 @@ func TestCloudPrune(t *testing.T) {
 
 	p.Start(func(m, _ *Manifest) {}, true, nil)
 	waitFor(t, func() bool { return p.fresh(a) }, "core file downloaded")
+	waitFor(t, func() bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.cloud != nil
+	}, "cloud manifest arrived")
 	done := make(chan bool, 1)
 	p.Ensure(ce.ID, func(ok bool) { done <- ok })
 	if ok := <-done; !ok {
@@ -497,7 +515,15 @@ func TestCloudPrune(t *testing.T) {
 	repo.set("cloud-manifest.json", cloudJSON(t, 2, []cloudEntry{next}))
 	repo.set(next.Path, "DDD")
 	p.Start(func(m, _ *Manifest) {}, true, nil)
-	waitFor(t, func() bool { return !fileExists(diskPath(p.dir, ce.File)) }, "retired cloud file removed")
+	// The state table's atomic rewrite trails the file removal by a
+	// moment; wait for both.
+	waitFor(t, func() bool {
+		if fileExists(diskPath(p.dir, ce.File)) {
+			return false
+		}
+		data, err := os.ReadFile(filepath.Join(p.dir, "state.json"))
+		return err == nil && !strings.Contains(string(data), ce.ID)
+	}, "retired cloud file and state entry removed")
 
 	if _, ok := readState(t, p.dir)[ce.ID]; ok {
 		t.Fatal("state kept the retired cloud sound")
@@ -526,12 +552,14 @@ func TestCloudBranchSources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	clouds := make(chan *Manifest, 2)
+	clouds := make(chan *Manifest, 4)
 	p.Start(func(_, cloud *Manifest) { clouds <- cloud }, true, nil)
-	if cloud := <-clouds; cloud == nil || len(cloud.Files) != 1 {
-		t.Fatalf("cloud manifest not fetched from the cloud branch: %v", cloud)
-	}
 	waitFor(t, func() bool { return p.fresh(a) }, "core file downloaded from master")
+	waitFor(t, func() bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.cloud != nil
+	}, "cloud manifest fetched from the cloud branch")
 	if master.hitsFor("cloud-manifest.json") != 0 {
 		t.Fatal("master was asked for the cloud manifest")
 	}
@@ -546,6 +574,50 @@ func TestCloudBranchSources(t *testing.T) {
 	}
 	if master.hitsFor(ce.Path) != 0 {
 		t.Fatal("master was asked for a cloud file")
+	}
+}
+
+// TestCloudCacheServedWhileFetchFails covers the first-paint promise: a
+// cached cloud manifest goes out with the core delivery even when the
+// cloud branch cannot be reached, and the failed refresh keeps the cache.
+func TestCloudCacheServedWhileFetchFails(t *testing.T) {
+	repo := newFakeRepo()
+	srv := serveRepo(t, repo)
+	p := newPack(t, srv.URL)
+
+	a := entry("cat/a", "A")
+	ce := cloudEntry{File: cloudFileEntry("cat/c", "CCC"), title: "丙"}
+	repo.set("manifest.json", manifestJSON(t, 1, []File{a}))
+	repo.set(a.Path, "A")
+	repo.set("cloud-manifest.json", cloudJSON(t, 1, []cloudEntry{ce}))
+	repo.set(ce.Path, "CCC")
+
+	p.Start(func(m, _ *Manifest) {}, true, nil)
+	waitFor(t, func() bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.cloud != nil
+	}, "cloud manifest cached")
+
+	// The cloud branch goes dark; a restart still hands the cache out
+	// with the first (core) delivery, and keeps it after the failure.
+	repo.del("cloud-manifest.json")
+	p2, err := openAt(p.dir, syncPost, bgCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clouds := make(chan *Manifest, 4)
+	p2.Start(func(_, cloud *Manifest) { clouds <- cloud }, true, nil)
+	if cloud := <-clouds; cloud == nil || len(cloud.Files) != 1 {
+		t.Fatalf("cached cloud manifest not delivered first: %v", cloud)
+	}
+	// The prefetch finishing means the failed cloud fetch returned first.
+	waitFor(t, func() bool { return p2.fresh(a) }, "core file downloaded")
+	p2.mu.Lock()
+	still := p2.cloud
+	p2.mu.Unlock()
+	if still == nil || len(still.Files) != 1 {
+		t.Fatal("a failed cloud refresh dropped the cached manifest")
 	}
 }
 
