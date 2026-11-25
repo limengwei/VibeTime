@@ -28,19 +28,12 @@ type Deps struct {
 // engine's goroutine like everything that touches the audio engine.
 type app struct {
 	deps    Deps
-	cx      *core.Scope
-	toaster *ui.Toaster
 	refresh *core.Signal[int] // bumped when plain state changes
 
 	focusOpen  *core.Signal[bool]
 	editorOpen *core.Signal[bool]
 	editorID   *core.Signal[string] // "" = new preset, else the custom id
 	master     *core.Signal[float64]
-
-	shareOpen  *core.Signal[bool]
-	shareCode  *core.Signal[string]
-	importOpen *core.Signal[bool]
-	importCode *core.Signal[string]
 
 	activeID      string // applied preset ID, "" when none
 	activePreset  catalog.Preset
@@ -52,17 +45,11 @@ type app struct {
 func Main(cx *core.Scope, deps Deps) core.Node {
 	a := &app{
 		deps:          deps,
-		cx:            cx,
-		toaster:       ui.NewToaster(cx),
 		refresh:       core.NewSignal(cx, 0),
 		focusOpen:     core.NewSignal(cx, false),
 		editorOpen:    core.NewSignal(cx, false),
 		editorID:      core.NewSignal(cx, ""),
 		master:        core.NewSignal(cx, 0.8),
-		shareOpen:     core.NewSignal(cx, false),
-		shareCode:     core.NewSignal(cx, ""),
-		importOpen:    core.NewSignal(cx, false),
-		importCode:    core.NewSignal(cx, ""),
 		activeVolumes: map[string]float64{},
 	}
 
@@ -83,12 +70,9 @@ func Main(cx *core.Scope, deps Deps) core.Node {
 			core.Show{When: a.editorOpen.Get, Then: func(cx *core.Scope) core.Node {
 				return presetEditor(cx, a)
 			}},
-			shareDialog(a),
-			importDialog(a),
 			core.Show{When: a.focusOpen.Get, Then: func(cx *core.Scope) core.Node {
 				return focusView(cx, a)
 			}},
-			ui.Toasts{Toaster: a.toaster},
 		},
 	}
 }
@@ -173,13 +157,13 @@ func (a *app) setSoundVolume(id string, v float64) {
 	a.refresh.Set(a.refresh.Get() + 1)
 }
 
-// presetGrid renders the scene cards, the add card and the import card.
+// presetGrid renders the scene cards and the add card.
 func presetGrid(a *app) core.Node {
 	cards := []core.Node{}
 	for _, p := range a.presets() {
 		cards = append(cards, presetCard(a, p))
 	}
-	cards = append(cards, addCard(a), importCard(a))
+	cards = append(cards, addCard(a))
 	return ui.Wrap{Children: cards}
 }
 
@@ -190,10 +174,8 @@ func presetCard(a *app, p catalog.Preset) core.Node {
 		core.Text{Content: p.Name, Style: core.Style{FontSize: 13, FontWeight: core.FontWeightMedium, Color: core.RGBA(0xffffff, 0.85), TextAlign: core.TextAlignCenter}},
 		core.Text{Content: p.Desc, MaxLines: 2, Style: core.Style{FontSize: 11, Color: core.RGBA(0xffffff, 0.3), TextAlign: core.TextAlignCenter}},
 	}
-	// Share sits at the corner for every card; customs add edit and delete.
-	editRight := core.Pt(6)
+	// Custom cards add edit and delete in the corners.
 	if !p.Builtin {
-		editRight = core.Pt(50)
 		children = append(children,
 			cardAction(iconPencil, "编辑", core.Pt(6), func() {
 				a.editorID.Set(p.ID)
@@ -211,9 +193,6 @@ func presetCard(a *app, p catalog.Preset) core.Node {
 			}),
 		)
 	}
-	children = append(children, cardAction(iconShare, "分享", editRight, func() {
-		a.openShare(p)
-	}))
 	return ui.Press{
 		OnPress:  func() { a.applyPreset(p) },
 		Label:    p.Name,
@@ -281,30 +260,6 @@ func addCard(a *app) core.Node {
 			core.Icon{SVG: iconPlus, Style: core.Style{Width: core.Pt(26), Height: core.Pt(26), Color: core.RGBA(0xffffff, 0.25)}},
 			core.Text{Content: "添加场景", Style: core.Style{FontSize: 13, FontWeight: core.FontWeightMedium, Color: core.RGBA(0xffffff, 0.85)}},
 			core.Text{Content: "自定义声音组合", Style: core.Style{FontSize: 11, Color: core.RGBA(0xffffff, 0.3)}},
-		}}},
-	}
-}
-
-// importCard is the dashed "import recipe" card.
-func importCard(a *app) core.Node {
-	return ui.Press{
-		OnPress: func() {
-			a.importCode.Set("")
-			a.importOpen.Set(true)
-		},
-		Label: "导入配方",
-		Style: core.Style{
-			Width: core.Pt(150), Padding: core.Symmetric(20, 12), CornerRadius: 16,
-			Direction: core.Row, AlignItems: core.AlignCenter, JustifyContent: core.JustifyCenter,
-			BorderStyle: core.BorderDashed, BorderColor: core.RGBA(0xffffff, 0.1), BorderWidth: 1,
-		},
-		StyleFunc: func() core.Style {
-			return core.Style{Hover: &core.Style{Background: core.RGBA(0x8b5cf6, 0.06), BorderColor: core.RGBA(0x8b5cf6, 0.4)}}
-		},
-		Children: []core.Node{core.View{Class: "flex-col items-center gap-1", Children: []core.Node{
-			core.Icon{SVG: iconDown, Style: core.Style{Width: core.Pt(24), Height: core.Pt(24), Color: core.RGBA(0xffffff, 0.25)}},
-			core.Text{Content: "导入配方", Style: core.Style{FontSize: 13, FontWeight: core.FontWeightMedium, Color: core.RGBA(0xffffff, 0.85)}},
-			core.Text{Content: "粘贴配方码", Style: core.Style{FontSize: 11, Color: core.RGBA(0xffffff, 0.3)}},
 		}}},
 	}
 }
