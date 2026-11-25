@@ -1,8 +1,8 @@
 # vibe-time 的 nsgo 工具配置（go tool nsgo dev / build 使用；
 # build 会临时生成资源 syso，产物在 dist/）。
 name: vibe-time
-id: com.vibetime.app
-version: 1.0.0
+id: limengwei.mindspace.vibetime
+version: 2.0.0
 copyright: © 2026 vibe-time
 appearance: dark
 
