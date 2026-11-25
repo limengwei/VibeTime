@@ -192,24 +192,42 @@ func presetCard(a *app, p catalog.Preset) core.Node {
 		core.Text{Content: p.Name, Style: core.Style{FontSize: 13, FontWeight: core.FontWeightMedium, Color: core.RGBA(0xffffff, 0.85), TextAlign: core.TextAlignCenter}},
 		core.Text{Content: p.Desc, MaxLines: 1, Style: core.Style{FontSize: 11, Color: core.RGBA(0xffffff, 0.3), TextAlign: core.TextAlignCenter}},
 	}
-	// Custom cards add edit and delete in the corners.
+	cardChildren := []core.Node{core.View{
+		Class: "flex-col items-center gap-1",
+		// The full width bounds the description, so its MaxLines
+		// ellipsizes instead of stretching the card with one long line.
+		Style:    core.Style{Width: core.Pct(100)},
+		Children: children,
+	}}
+	// Custom cards add edit and delete in the top-right corner, direct
+	// children of the card: the card itself (Position: Relative below)
+	// anchors the strip in its padding box at the rim. The two buttons sit
+	// in one absolutely-placed row, so their gap is ordinary layout rather
+	// than a Right inset (valued insets scale wrongly under display
+	// scaling).
 	if !p.Builtin {
-		children = append(children,
-			cardAction(iconPencil, "编辑", core.Pt(0), func() {
-				a.editorID.Set(p.ID)
-				a.editorOpen.Set(true)
-			}),
-			cardAction(iconX, "删除", core.Pt(18), func() {
-				if i := a.deps.Store.FindCustom(p.ID); i >= 0 {
-					a.deps.Store.Custom = append(a.deps.Store.Custom[:i], a.deps.Store.Custom[i+1:]...)
-					_ = a.deps.Store.Save()
-					if a.activeID == p.ID {
-						a.stopAll(true)
+		cardChildren = append(cardChildren, core.View{
+			Style: core.Style{
+				Position: core.Absolute, Top: core.Pt(2), Right: core.Pt(2),
+				Direction: core.Row, Gap: 2,
+			},
+			Children: []core.Node{
+				cardAction(iconX, "删除", func() {
+					if i := a.deps.Store.FindCustom(p.ID); i >= 0 {
+						a.deps.Store.Custom = append(a.deps.Store.Custom[:i], a.deps.Store.Custom[i+1:]...)
+						_ = a.deps.Store.Save()
+						if a.activeID == p.ID {
+							a.stopAll(true)
+						}
+						a.gridRev.Set(a.gridRev.GetUntracked() + 1)
 					}
-					a.gridRev.Set(a.gridRev.GetUntracked() + 1)
-				}
-			}),
-		)
+				}),
+				cardAction(iconPencil, "编辑", func() {
+					a.editorID.Set(p.ID)
+					a.editorOpen.Set(true)
+				}),
+			},
+		})
 	}
 	return ui.Press{
 		OnPress:  func() { a.applyPreset(p) },
@@ -218,6 +236,7 @@ func presetCard(a *app, p catalog.Preset) core.Node {
 		Style: core.Style{
 			Width: core.Pt(150), Padding: core.Symmetric(20, 12), CornerRadius: 16,
 			Direction: core.Row, AlignItems: core.AlignCenter, JustifyContent: core.JustifyCenter,
+			Position: core.Relative,
 		},
 		StyleFunc: func() core.Style {
 			a.refresh.Get()
@@ -236,27 +255,17 @@ func presetCard(a *app, p catalog.Preset) core.Node {
 			}
 			return base
 		},
-		Children: []core.Node{core.View{
-			Class: "flex-col items-center gap-1",
-			// Relative anchors the corner buttons' absolute placement to
-			// the card (a static ancestor would let them escape to a
-			// farther one); the full width bounds the description, so its
-			// MaxLines ellipsizes instead of stretching the card with one
-			// long line.
-			Style:    core.Style{Width: core.Pct(100), Position: core.Relative},
-			Children: children,
-		}},
+		Children: cardChildren,
 	}
 }
 
-// cardAction is a small absolute corner button on custom cards.
-func cardAction(svg *core.SVG, label string, right core.Length, onPress func()) core.Node {
+// cardAction is a small corner button inside the card's action strip.
+func cardAction(svg *core.SVG, label string, onPress func()) core.Node {
 	return core.View{
 		OnPress: func(core.PressEvent) { onPress() },
 		NoFocus: true,
 		Label:   label,
 		Style: core.Style{
-			Position: core.Absolute, Top: core.Pt(0), Right: right,
 			Width: core.Pt(20), Height: core.Pt(20), CornerRadius: 6,
 			AlignItems: core.AlignCenter, JustifyContent: core.JustifyCenter,
 		},
