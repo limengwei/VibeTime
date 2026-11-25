@@ -32,9 +32,9 @@ type editor struct {
 	order      []string
 	selRefresh *core.Signal[int]
 
-	// started tracks the previews this editor began, so closing it stops
-	// only those: the scene already playing when it opened keeps playing.
-	started map[string]bool
+	// saved marks a save() already under way: closing then must not stop
+	// what applyPreset started, whenever the dialog's close callback runs.
+	saved bool
 
 	// editingID is the custom preset being edited, "" for a new one.
 	editingID string
@@ -50,15 +50,15 @@ func presetEditor(cx *core.Scope, a *app) core.Node {
 		desc:       core.NewSignal(cx, ""),
 		selected:   map[string]float64{},
 		selRefresh: core.NewSignal(cx, 0),
-		started:    map[string]bool{},
 		editingID:  a.editorID.Get(),
 	}
 
-	// The mix playing when the editor opens keeps playing; picking sounds
-	// previews them alongside it. Editing preloads the preset. The work runs
-	// as an effect, after this build commits, so no signal is written while
-	// it renders.
+	// Opening the editor stops whatever plays and drops the applied scene,
+	// as pressing 全部停止 does; picking sounds then previews them, and
+	// editing preloads the preset. The work runs as an effect, after this
+	// build commits, so no signal is written while it renders.
 	cx.Effect(func() {
+		a.stopAll(true)
 		if e.editingID != "" {
 			if i := a.deps.Store.FindCustom(e.editingID); i >= 0 {
 				p := a.deps.Store.Custom[i]
@@ -196,9 +196,7 @@ func (e *editor) bumpSel() {
 	e.selRefresh.Set(e.selRefresh.GetUntracked() + 1)
 }
 
-// pick adds a sound (previewing it) at volume v. A sound already playing —
-// one of the scene playing under the editor — is left as it is, so the
-// editor never disturbs that scene.
+// pick adds a sound (previewing it) at volume v.
 func (e *editor) pick(id string, v float64) {
 	if _, ok := e.selected[id]; ok {
 		return
@@ -208,15 +206,11 @@ func (e *editor) pick(id string, v float64) {
 	}
 	e.selected[id] = v
 	e.order = append(e.order, id)
-	if !e.a.deps.Engine.Playing(id) {
-		e.a.deps.Engine.Play(id, v)
-		e.started[id] = true
-	}
+	e.a.deps.Engine.Play(id, v)
 	e.bumpSel()
 }
 
-// unpick removes a sound and stops its preview, unless the sound was
-// already playing when picked (it belongs to the scene under the editor).
+// unpick removes a sound and stops its preview.
 func (e *editor) unpick(id string) {
 	if _, ok := e.selected[id]; ok {
 		delete(e.selected, id)
@@ -226,10 +220,7 @@ func (e *editor) unpick(id string) {
 				break
 			}
 		}
-		if e.started[id] {
-			e.a.deps.Engine.Stop(id)
-			delete(e.started, id)
-		}
+		e.a.deps.Engine.Stop(id)
 		e.bumpSel()
 	}
 }
@@ -243,11 +234,12 @@ func (e *editor) toggle(id string) {
 	}
 }
 
-// close stops the previews this editor started and dismisses the dialog;
-// the scene playing when it opened keeps playing.
+// close stops the previews and dismisses the dialog. A save() already
+// under way applied its preset, so only a plain close (cancel, Esc, the
+// backdrop) stops the previews.
 func (e *editor) close() {
-	for id := range e.started {
-		e.a.deps.Engine.Stop(id)
+	if !e.saved {
+		e.a.deps.Engine.StopAll()
 	}
 	e.a.editorOpen.Set(false)
 }
@@ -303,6 +295,9 @@ func (e *editor) save() {
 	}
 	// The grid must show the new or edited card right away.
 	e.a.gridRev.Set(e.a.gridRev.GetUntracked() + 1)
+	// Mark saved before the dialog closes, so the close that follows never
+	// stops the preset applyPreset is about to play.
+	e.saved = true
 	e.a.editorOpen.Set(false)
 	// Apply fresh: applyPreset skips a repeated ID, so clear it first.
 	e.a.activeID = ""
