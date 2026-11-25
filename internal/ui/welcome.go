@@ -18,6 +18,8 @@ type welcomeState struct {
 	open    *core.Signal[bool]
 	pack    *pack.Pack
 	ready   func() bool // the manifest has arrived
+	failed  func() bool // the manifest could not be fetched
+	onRetry func()      // try the manifest again
 	onReady func()      // download complete: close and enter the app
 }
 
@@ -69,19 +71,31 @@ func welcomePanel(cx *core.Scope, s welcomeState) core.Node {
 				core.Text{Content: "声音库不随安装包分发，首次使用需下载（约 48.5 MB，经镜像加速的 GitHub 仓库），仅此一次，之后离线可用。", Style: core.Style{FontSize: 12, Color: core.RGBA(0xffffff, 0.4), TextAlign: core.TextAlignCenter}},
 			}},
 
-			// download button / progress / error
+			// download button / progress / error. TextFunc keeps the label
+			// live: the branch builds before the manifest arrives, and the
+			// button must switch from fetching to ready without a rebuild.
 			core.Show{When: func() bool { return stateSig.Get() != "running" }, Then: func(cx *core.Scope) core.Node {
-				label := "下载声音库（约 48.5 MB）"
-				if !s.ready() {
-					label = "正在获取声音列表…"
-				} else if stateSig.Get() == "error" {
-					label = "重试下载"
-				}
 				return core.View{Class: "gap-2 flex-col items-center", Children: []core.Node{
 					ui.Button{
-						Text:     label,
-						Disabled: func() bool { return !s.ready() },
-						OnPress:  start,
+						TextFunc: func() string {
+							switch {
+							case s.failed():
+								return "网络连接失败，点击重试"
+							case !s.ready():
+								return "正在获取声音列表…"
+							case stateSig.Get() == "error":
+								return "重试下载"
+							}
+							return "下载声音库（约 48.5 MB）"
+						},
+						Disabled: func() bool { return !s.ready() && !s.failed() },
+						OnPress: func() {
+							if s.failed() && !s.ready() {
+								s.onRetry()
+								return
+							}
+							start()
+						},
 					},
 					core.Show{When: func() bool { return stateSig.Get() == "error" }, Then: func(cx *core.Scope) core.Node {
 						return core.Text{ContentFunc: func() string { return progSig.Get().phase },

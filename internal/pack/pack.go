@@ -148,7 +148,9 @@ func Open(cx *core.Scope) (*Pack, error) {
 // reports it on the app's goroutine, prunes files the pack dropped, then
 // prefetches whatever is missing in the background — unless prefetch is
 // false, when the welcome page's Download owns the first fill instead.
-func (p *Pack) Start(onManifest func(*Manifest), prefetch bool) {
+// With no manifest to fall back to either (a first launch offline),
+// onFail runs instead of onManifest; calling Start again retries.
+func (p *Pack) Start(onManifest func(*Manifest), prefetch bool, onFail func()) {
 	go func() {
 		ctx := p.cx.Context()
 		m, err := p.fetchManifest(ctx)
@@ -158,6 +160,9 @@ func (p *Pack) Start(onManifest func(*Manifest), prefetch bool) {
 			m = p.man
 			p.mu.Unlock()
 			if m == nil {
+				if onFail != nil {
+					p.cx.Post(onFail)
+				}
 				return
 			}
 		} else {

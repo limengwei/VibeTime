@@ -45,6 +45,7 @@ type app struct {
 	master      *core.Signal[float64]
 	welcomeOpen *core.Signal[bool] // first launch: the sound pack's download dialog
 	packReady   *core.Signal[bool] // the manifest has arrived
+	packFailed  *core.Signal[bool] // the manifest could not be fetched (offline)
 
 	activeID      string // applied preset ID, "" when none
 	activePreset  catalog.Preset
@@ -73,24 +74,7 @@ func Main(cx *core.Scope, deps Deps) core.Node {
 	// fills quietly. A cold start (nothing cached) holds the prefetch for
 	// the welcome dialog instead, so the user consents to the download.
 	coldStart := deps.Pack != nil && deps.Pack.CachedCount() == 0
-	if deps.Pack != nil {
-		deps.Pack.Start(func(m *pack.Manifest) {
-			for _, f := range m.Files {
-				if _, ok := a.deps.Catalog.Sound(f.ID); !ok {
-					s := catalog.SoundFromID(f.ID)
-					if _, base, _ := strings.Cut(f.ID, "/"); m.Labels[base] != "" {
-						s.Label = m.Labels[base]
-					}
-					a.deps.Catalog.AddSound(s)
-				}
-			}
-			for id, cm := range m.Categories {
-				a.deps.Catalog.SetCategoryMeta(id, cm.Title, cm.Emoji)
-			}
-			a.packReady.Set(true)
-			a.bumpRefresh()
-		}, !coldStart)
-	}
+	a.startPack(!coldStart)
 	if coldStart {
 		a.welcomeOpen.Set(true)
 	}
@@ -118,9 +102,14 @@ func Main(cx *core.Scope, deps Deps) core.Node {
 			}},
 			core.Show{When: a.welcomeOpen.Get, Then: func(cx *core.Scope) core.Node {
 				return welcomePanel(cx, welcomeState{
-					open:  a.welcomeOpen,
-					pack:  deps.Pack,
-					ready: a.packReady.Get,
+					open:   a.welcomeOpen,
+					pack:   deps.Pack,
+					ready:  a.packReady.Get,
+					failed: a.packFailed.Get,
+					onRetry: func() {
+						a.packFailed.Set(false)
+						a.startPack(false)
+					},
 					onReady: func() {
 						a.welcomeOpen.Set(false)
 						a.bumpRefresh()
@@ -137,6 +126,35 @@ var appBackground = core.Style{
 	Gradients: []core.Gradient{
 		core.LinearGradient(145, core.RGB(0x0a0e17), core.RGB(0x111827), core.RGB(0x0f1520)),
 	},
+}
+
+// startPack fetches the manifest and merges it into the catalog, prefetching
+// after (unless the welcome dialog owns the first fill). It is re-runnable:
+// the welcome dialog's retry calls it again after a failure.
+func (a *app) startPack(prefetch bool) {
+	if a.deps.Pack == nil {
+		return
+	}
+	a.deps.Pack.Start(func(m *pack.Manifest) {
+		for _, f := range m.Files {
+			if _, ok := a.deps.Catalog.Sound(f.ID); !ok {
+				s := catalog.SoundFromID(f.ID)
+				if _, base, _ := strings.Cut(f.ID, "/"); m.Labels[base] != "" {
+					s.Label = m.Labels[base]
+				}
+				a.deps.Catalog.AddSound(s)
+			}
+		}
+		for id, cm := range m.Categories {
+			a.deps.Catalog.SetCategoryMeta(id, cm.Title, cm.Emoji)
+		}
+		a.packReady.Set(true)
+		a.packFailed.Set(false)
+		a.bumpRefresh()
+	}, prefetch, func() {
+		a.packFailed.Set(true)
+		a.bumpRefresh()
+	})
 }
 
 // header is the title block.
