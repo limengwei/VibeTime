@@ -1,12 +1,3 @@
 dist/
 .nsgo/
-
-# Beads / Dolt files (added by bd init)
-.dolt/
-*.db
-.beads-credential-key
-/.beads
-/.claude
 /.trae
-CLAUDE.md
-AGENTS.md
