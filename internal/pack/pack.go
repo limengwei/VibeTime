@@ -11,6 +11,7 @@
 package pack
 
 import (
+	"archive/zip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -32,26 +33,54 @@ import (
 	"vibe-time/internal/catalog"
 )
 
-// Sources are base URLs serving the pack repository: manifest.json,
-// labels.json and the files' Paths live under each. gitee's raw endpoint
-// first (no mirror needed in mainland China), GitHub raw behind it.
-// VIBE_PACK_SOURCES (comma-separated) overrides the list, for mirrors and
-// local testing.
+// source is one place the pack is served from: raw is the base URL under
+// which manifest.json, labels.json and the files' Paths live; archive, when
+// set, serves the whole repository as a zip (gitee's repository/archive
+// endpoint, GitHub's codeload), which a cold start fetches in one request.
+type source struct {
+	raw     string
+	archive string
+}
+
+// Sources are the places the pack is served from. gitee first (no mirror
+// needed in mainland China), GitHub behind it. VIBE_PACK_SOURCES
+// (comma-separated) overrides the raw URLs, for mirrors and local testing;
+// such sources have no archive and fall back to file-by-file.
 var Sources = defaultSources()
 
-func defaultSources() []string {
-	var out []string
-	for _, part := range strings.Split(os.Getenv("VIBE_PACK_SOURCES"), ",") {
-		if p := strings.TrimSpace(part); p != "" {
-			out = append(out, p)
+func defaultSources() []source {
+	if env := os.Getenv("VIBE_PACK_SOURCES"); env != "" {
+		var out []source
+		for _, part := range strings.Split(env, ",") {
+			if p := strings.TrimSpace(part); p != "" {
+				out = append(out, source{raw: p})
+			}
+		}
+		if len(out) > 0 {
+			return out
 		}
 	}
-	if len(out) > 0 {
-		return out
-	}
-	return []string{
-		"https://gitee.com/limengwe/vibe-time-sound/raw/master",
-		"https://raw.githubusercontent.com/limengwei/vibe-time-sound/master",
+	return []source{
+		// Mirror-accelerated GitHub first (reachable from mainland China
+		// without a proxy); the mirrors are community-run and do fall over,
+		// so direct GitHub follows, then gitee's raw endpoint as the last
+		// resort — its archive endpoint sits behind risk-control captcha
+		// pages and is deliberately left out.
+		{
+			raw:     "https://ghfast.top/https://raw.githubusercontent.com/limengwei/vibe-time-sound/master",
+			archive: "https://ghfast.top/https://github.com/limengwei/vibe-time-sound/archive/refs/heads/master.zip",
+		},
+		{
+			raw:     "https://gh-proxy.com/https://raw.githubusercontent.com/limengwei/vibe-time-sound/master",
+			archive: "https://gh-proxy.com/https://github.com/limengwei/vibe-time-sound/archive/refs/heads/master.zip",
+		},
+		{
+			raw:     "https://raw.githubusercontent.com/limengwei/vibe-time-sound/master",
+			archive: "https://codeload.github.com/limengwei/vibe-time-sound/zip/refs/heads/master",
+		},
+		{
+			raw: "https://gitee.com/limengwe/vibe-time-sound/raw/master",
+		},
 	}
 }
 
@@ -243,7 +272,7 @@ func (p *Pack) pathOfLocked(id string) string {
 // from the first source that serves them.
 func (p *Pack) fetchManifest(ctx context.Context) (*Manifest, error) {
 	var lastErr error
-	for _, base := range Sources {
+	for _, src := range Sources {
 		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		data, err := p.fetch(cctx, "manifest.json")
 		if err != nil {
@@ -254,12 +283,12 @@ func (p *Pack) fetchManifest(ctx context.Context) (*Manifest, error) {
 		var m Manifest
 		if err := json.Unmarshal(data, &m); err != nil {
 			cancel()
-			lastErr = fmt.Errorf("%s: %w", base, err)
+			lastErr = fmt.Errorf("%s: %w", src.raw, err)
 			continue
 		}
 		if len(m.Files) == 0 {
 			cancel()
-			lastErr = fmt.Errorf("%s: empty manifest", base)
+			lastErr = fmt.Errorf("%s: empty manifest", src.raw)
 			continue
 		}
 		if ldata, err := p.fetch(cctx, "labels.json"); err == nil {
@@ -280,9 +309,22 @@ func (p *Pack) fetchManifest(ctx context.Context) (*Manifest, error) {
 	return nil, lastErr
 }
 
-// prefetch quietly downloads every missing file, one at a time; a file
-// the user's Ensure already fetched is skipped by the time we reach it.
+// prefetch quietly fills the cache. A cold start (nothing cached) takes
+// the whole-repository zip in one request — gitee's archive streams at
+// several MB/s where its raw endpoint answers under one — while updates
+// and stragglers go file by file, so one changed sound never re-downloads
+// the pack. A file the user's Ensure already fetched is skipped.
 func (p *Pack) prefetch(ctx context.Context, m *Manifest) {
+	if p.cachedCount(m) == 0 {
+		if err := p.fetchArchive(ctx, m); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("[pack] 整库 zip 下载失败，回退逐个文件: %v", err)
+		} else {
+			log.Printf("[pack] 声音包整库下载完成（version %d，%d 个文件）", m.Version, len(m.Files))
+		}
+	}
 	for _, f := range m.Files {
 		select {
 		case <-ctx.Done():
@@ -302,12 +344,125 @@ func (p *Pack) prefetch(ctx context.Context, m *Manifest) {
 	log.Printf("[pack] 声音包预取完成（version %d，%d 个文件）", m.Version, len(m.Files))
 }
 
+// cachedCount counts how many of the manifest's files are on disk.
+func (p *Pack) cachedCount(m *Manifest) int {
+	n := 0
+	for _, f := range m.Files {
+		if p.Cached(f.ID) {
+			n++
+		}
+	}
+	return n
+}
+
+// fetchArchive downloads a whole-repository zip, trying every source that
+// serves one, and stores each file it lists against the manifest's hash;
+// the zip itself lands in a temp file, never memory.
+func (p *Pack) fetchArchive(ctx context.Context, m *Manifest) error {
+	var lastErr error = errors.New("pack: no archive source")
+	for _, src := range Sources {
+		if src.archive == "" {
+			continue
+		}
+		err := p.fetchArchiveFrom(ctx, src.archive, m)
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return err
+		}
+		lastErr = err
+	}
+	return lastErr
+}
+
+// fetchArchiveFrom fetches one archive URL.
+func (p *Pack) fetchArchiveFrom(ctx context.Context, url string, m *Manifest) error {
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	req, err := http.NewRequestWithContext(cctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := p.client().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("archive: HTTP %d", resp.StatusCode)
+	}
+	// A mirror or host under risk control answers with an HTML page where
+	// the zip should be; fail that source cleanly instead of parsing it.
+	if ct := resp.Header.Get("Content-Type"); strings.Contains(ct, "text/html") {
+		return fmt.Errorf("archive: got %s, not a zip (risk control?)", ct)
+	}
+	zipPath := filepath.Join(p.dir, "archive.zip.tmp")
+	out, err := os.Create(zipPath)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, resp.Body); err != nil {
+		out.Close()
+		os.Remove(zipPath)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(zipPath)
+		return err
+	}
+	defer os.Remove(zipPath)
+
+	zr, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return err
+	}
+	defer zr.Close()
+	byPath := make(map[string]File, len(m.Files))
+	for _, f := range m.Files {
+		byPath[f.Path] = f
+	}
+	stored := 0
+	for _, e := range zr.File {
+		if e.FileInfo().IsDir() {
+			continue
+		}
+		// Zip entries sit under a "<repo>-<branch>/" prefix; the pack's
+		// Paths follow it.
+		rel := e.Name
+		if i := strings.Index(rel, "/"); i >= 0 {
+			rel = rel[i+1:]
+		}
+		f, listed := byPath[filepath.ToSlash(rel)]
+		if !listed {
+			continue
+		}
+		rc, err := e.Open()
+		if err != nil {
+			return err
+		}
+		data, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			return err
+		}
+		if err := p.store(f, data); err != nil {
+			return err
+		}
+		stored++
+	}
+	if stored == 0 {
+		return errors.New("archive: no manifest files inside")
+	}
+	return nil
+}
+
 // fetch GETs rel (relative to a source) from the first source that
 // answers, returning its bytes.
 func (p *Pack) fetch(ctx context.Context, rel string) ([]byte, error) {
 	var lastErr error
-	for _, base := range Sources {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(base, "/")+"/"+rel, nil)
+	for _, src := range Sources {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(src.raw, "/")+"/"+rel, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -323,7 +478,7 @@ func (p *Pack) fetch(ctx context.Context, rel string) ([]byte, error) {
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
-			lastErr = fmt.Errorf("%s: HTTP %d", base, resp.StatusCode)
+			lastErr = fmt.Errorf("%s: HTTP %d", src.raw, resp.StatusCode)
 			continue
 		}
 		return data, nil
@@ -339,12 +494,18 @@ func (p *Pack) download(ctx context.Context, f File) error {
 	if err != nil {
 		return err
 	}
+	return p.store(f, data)
+}
+
+// store verifies a file's bytes against the manifest and moves them into
+// place, atomically.
+func (p *Pack) store(f File, data []byte) error {
 	if int64(len(data)) != f.Size {
-		return fmt.Errorf("size %d, want %d", len(data), f.Size)
+		return fmt.Errorf("%s: size %d, want %d", f.ID, len(data), f.Size)
 	}
 	sum := sha256.Sum256(data)
 	if hex.EncodeToString(sum[:]) != f.SHA56 {
-		return errors.New("sha256 mismatch")
+		return fmt.Errorf("%s: sha256 mismatch", f.ID)
 	}
 	dst := filepath.Join(p.dir, filepath.FromSlash(f.Path))
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
