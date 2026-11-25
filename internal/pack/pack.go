@@ -3,11 +3,14 @@
 // config directory once fetched, and callers either wait on a specific
 // sound (Ensure) or let the background prefetch quietly fill the cache.
 //
-// Sources are tried in order — gitee first (reachable from mainland
-// China without a mirror), GitHub raw as the fallback — and every
-// download is verified against the manifest's hash before it is kept.
-// Callbacks always run on the app's goroutine through cx.Post, so
-// handlers may touch signals and the audio engine freely.
+// Every download is verified against the manifest's hash before it is
+// kept, and a state table of those hashes lets later runs tell a changed
+// file from a cached one — repository updates flow in silently. Sources
+// are raced, all at once: the built-in mirrors plus any raw base URLs the
+// repository hands down in sources.json (swappable without a client
+// release), and, per file, a direct URL from labels.json's attribution.
+// Callbacks always run on the app's goroutine through post, so handlers
+// may touch signals and the audio engine freely.
 package pack
 
 import (
@@ -86,10 +89,10 @@ func defaultSources() []source {
 
 // File is one sound in the manifest.
 type File struct {
-	ID    string `json:"id"` // "category/file-base", the app's sound ID
-	Path  string `json:"path"`
-	Size  int64  `json:"size"`
-	SHA56 string `json:"sha256"`
+	ID     string `json:"id"` // "category/file-base", the app's sound ID
+	Path   string `json:"path"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
 }
 
 // Manifest is the pack's index.
@@ -101,6 +104,13 @@ type Manifest struct {
 	// category ID → title and emoji. Both may be empty when it is missing.
 	Labels     map[string]string               `json:"labels,omitempty"`
 	Categories map[string]catalog.CategoryMeta `json:"categories,omitempty"`
+	// Attribution is labels.json's optional per-base origin/license/url
+	// metadata; URL is raced as a direct download candidate (see fetch).
+	Attribution map[string]catalog.Attribution `json:"attribution,omitempty"`
+	// Sources comes from the repository's optional sources.json: raw base
+	// URLs the repository hands down, so mirrors can be swapped without a
+	// client release. They join every fetch's race after the built-ins.
+	Sources []string `json:"sources,omitempty"`
 }
 
 // ByID returns the manifest entry for a sound ID.
@@ -115,12 +125,19 @@ func (m *Manifest) ByID(id string) (File, bool) {
 
 // Pack is the runtime downloader and local cache.
 type Pack struct {
-	cx  *core.Scope
 	dir string // <user config>/vibe-time/pack
 
-	mu      sync.Mutex
-	man     *Manifest
-	pending map[string][]func(bool) // waiters for a download in flight
+	// post lands callbacks on the app's goroutine; ctxFn yields the
+	// context downloads respect. Open wires both from the UI scope;
+	// tests inject their own.
+	post  func(func())
+	ctxFn func() context.Context
+
+	mu       sync.Mutex
+	man      *Manifest
+	pending  map[string][]func(bool) // waiters for a download in flight
+	state    map[string]string       // sound ID → sha256 of the bytes on disk
+	extraRaw []string                // raw sources the repository handed down
 }
 
 // Open prepares the cache directory and loads the last fetched manifest,
@@ -130,16 +147,27 @@ func Open(cx *core.Scope) (*Pack, error) {
 	if err != nil {
 		return nil, err
 	}
+	return openAt(filepath.Join(cfg, "vibe-time", "pack"), cx.Post, cx.Context)
+}
+
+// openAt builds the pack rooted at dir: post runs callbacks on the app's
+// goroutine, ctxFn yields the app's context. Tests inject a synchronous
+// post and context.Background.
+func openAt(dir string, post func(func()), ctxFn func() context.Context) (*Pack, error) {
 	p := &Pack{
-		cx:      cx,
-		dir:     filepath.Join(cfg, "vibe-time", "pack"),
+		dir:     dir,
+		post:    post,
+		ctxFn:   ctxFn,
 		pending: map[string][]func(bool){},
+		state:   map[string]string{},
 	}
 	if err := os.MkdirAll(p.soundsDir(), 0o755); err != nil {
 		return nil, err
 	}
+	p.loadState()
 	if m, err := p.loadCachedManifest(); err == nil {
 		p.man = m
+		p.extraRaw = m.Sources
 	}
 	return p, nil
 }
@@ -152,7 +180,7 @@ func Open(cx *core.Scope) (*Pack, error) {
 // onFail runs instead of onManifest; calling Start again retries.
 func (p *Pack) Start(onManifest func(*Manifest), prefetch bool, onFail func()) {
 	go func() {
-		ctx := p.cx.Context()
+		ctx := p.ctxFn()
 		m, err := p.fetchManifest(ctx)
 		if err != nil {
 			log.Printf("[pack] manifest 拉取失败（使用本地缓存）: %v", err)
@@ -161,7 +189,7 @@ func (p *Pack) Start(onManifest func(*Manifest), prefetch bool, onFail func()) {
 			p.mu.Unlock()
 			if m == nil {
 				if onFail != nil {
-					p.cx.Post(onFail)
+					p.post(onFail)
 				}
 				return
 			}
@@ -172,11 +200,12 @@ func (p *Pack) Start(onManifest func(*Manifest), prefetch bool, onFail func()) {
 			}
 			p.mu.Lock()
 			p.man = m
+			p.extraRaw = m.Sources
 			p.mu.Unlock()
 			p.prune(m)
 		}
 		mm := m
-		p.cx.Post(func() { onManifest(mm) })
+		p.post(func() { onManifest(mm) })
 		if prefetch {
 			p.prefetch(ctx, m)
 		}
@@ -198,7 +227,7 @@ func (p *Pack) Download(ctx context.Context, onProgress func(phase string, done,
 	}
 	missing := 0
 	for _, f := range m.Files {
-		if !p.Cached(f.ID) {
+		if !p.fresh(f) {
 			missing++
 		}
 	}
@@ -232,7 +261,7 @@ func (p *Pack) Download(ctx context.Context, onProgress func(phase string, done,
 			return ctx.Err()
 		default:
 		}
-		if p.Cached(f.ID) {
+		if p.fresh(f) {
 			continue
 		}
 		onProgress("补齐", int64(i+1), int64(len(m.Files)))
@@ -247,9 +276,9 @@ func (p *Pack) Download(ctx context.Context, onProgress func(phase string, done,
 	return nil
 }
 
-// CachedCount reports how many of the current manifest's files are on
-// disk (0 with no manifest — a fresh install).
-func (p *Pack) CachedCount() int {
+// ReadyCount reports how many of the current manifest's files are on disk
+// with the manifest's current bytes (0 with no manifest — a fresh install).
+func (p *Pack) ReadyCount() int {
 	p.mu.Lock()
 	m := p.man
 	p.mu.Unlock()
@@ -282,6 +311,65 @@ func (p *Pack) Pending(id string) bool {
 	return busy
 }
 
+// fresh reports whether the bytes on disk are the manifest's current
+// bytes for f. The state table answers from its recorded hash; a cache
+// from before the table existed (or a damaged table) hashes the file
+// once and backfills the entry, so old caches never re-download.
+func (p *Pack) fresh(f File) bool {
+	path := filepath.Join(p.dir, filepath.FromSlash(f.Path))
+	st, err := os.Stat(path)
+	if err != nil || st.Size() != f.Size {
+		return false
+	}
+	p.mu.Lock()
+	h, ok := p.state[f.ID]
+	p.mu.Unlock()
+	if ok {
+		return h == f.SHA256
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	sum := sha256.Sum256(data)
+	if hex.EncodeToString(sum[:]) != f.SHA256 {
+		return false
+	}
+	p.mu.Lock()
+	p.state[f.ID] = f.SHA256
+	p.saveStateLocked()
+	p.mu.Unlock()
+	return true
+}
+
+// statePath is the id → sha256 table of the bytes on disk.
+func (p *Pack) statePath() string { return filepath.Join(p.dir, "state.json") }
+
+// loadState reads the state table; a missing or damaged file just means
+// the hashes get re-derived (see fresh).
+func (p *Pack) loadState() {
+	data, err := os.ReadFile(p.statePath())
+	if err != nil {
+		return
+	}
+	var s map[string]string
+	if err := json.Unmarshal(data, &s); err == nil && s != nil {
+		p.state = s
+	}
+}
+
+// saveStateLocked persists the state table atomically; mu is held.
+func (p *Pack) saveStateLocked() {
+	data, err := json.MarshalIndent(p.state, "", "  ")
+	if err != nil {
+		return
+	}
+	tmp := p.statePath() + ".tmp"
+	if os.WriteFile(tmp, data, 0o644) == nil {
+		_ = os.Rename(tmp, p.statePath())
+	}
+}
+
 // Read returns a cached sound's bytes, or an error when not downloaded.
 func (p *Pack) Read(id string) ([]byte, error) {
 	p.mu.Lock()
@@ -296,21 +384,22 @@ func (p *Pack) Read(id string) ([]byte, error) {
 // Ensure downloads a sound if needed and reports ok on the app's
 // goroutine; concurrent calls for the same sound share one download.
 func (p *Pack) Ensure(id string, done func(ok bool)) {
-	if p.Cached(id) {
-		ok := true
-		p.cx.Post(func() { done(ok) })
-		return
-	}
 	p.mu.Lock()
 	entry, inManifest := File{}, false
 	if p.man != nil {
 		entry, inManifest = p.man.ByID(id)
 	}
-	if !inManifest {
-		p.mu.Unlock()
-		p.cx.Post(func() { done(false) })
+	p.mu.Unlock()
+	if inManifest && p.fresh(entry) {
+		ok := true
+		p.post(func() { done(ok) })
 		return
 	}
+	if !inManifest {
+		p.post(func() { done(false) })
+		return
+	}
+	p.mu.Lock()
 	if waiters, busy := p.pending[id]; busy {
 		p.pending[id] = append(waiters, done)
 		p.mu.Unlock()
@@ -320,7 +409,7 @@ func (p *Pack) Ensure(id string, done func(ok bool)) {
 	p.mu.Unlock()
 
 	go func() {
-		err := p.download(p.cx.Context(), entry)
+		err := p.download(p.ctxFn(), entry)
 		ok := err == nil
 		if err != nil {
 			log.Printf("[pack] 下载 %s 失败: %v", id, err)
@@ -329,7 +418,7 @@ func (p *Pack) Ensure(id string, done func(ok bool)) {
 		waiters := p.pending[id]
 		delete(p.pending, id)
 		p.mu.Unlock()
-		p.cx.Post(func() {
+		p.post(func() {
 			for _, w := range waiters {
 				w(ok)
 			}
@@ -355,10 +444,10 @@ func (p *Pack) pathOfLocked(id string) string {
 	return filepath.Join(p.dir, filepath.FromSlash(f.Path))
 }
 
-// fetchManifest pulls manifest.json — and labels.json when it answers.
-// fetch races every source, so one round is enough.
+// fetchManifest pulls manifest.json — labels.json and sources.json when
+// they answer. fetch races every source, so one round is enough.
 func (p *Pack) fetchManifest(ctx context.Context) (*Manifest, error) {
-	data, err := p.fetch(ctx, "manifest.json")
+	data, err := p.fetch(ctx, "manifest.json", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -369,13 +458,24 @@ func (p *Pack) fetchManifest(ctx context.Context) (*Manifest, error) {
 	if len(m.Files) == 0 {
 		return nil, errors.New("manifest: no files")
 	}
-	if ldata, err := p.fetch(ctx, "labels.json"); err == nil {
+	if ldata, err := p.fetch(ctx, "labels.json", nil); err == nil {
 		var lf struct {
-			Categories map[string]catalog.CategoryMeta `json:"categories"`
-			Labels     map[string]string               `json:"labels"`
+			Categories  map[string]catalog.CategoryMeta `json:"categories"`
+			Labels      map[string]string               `json:"labels"`
+			Attribution map[string]catalog.Attribution  `json:"attribution"`
 		}
 		if err := json.Unmarshal(ldata, &lf); err == nil {
-			m.Categories, m.Labels = lf.Categories, lf.Labels
+			m.Categories, m.Labels, m.Attribution = lf.Categories, lf.Labels, lf.Attribution
+		}
+	}
+	// sources.json is optional: the repository hands down extra raw
+	// sources here, swappable without a client release.
+	if sdata, err := p.fetch(ctx, "sources.json", nil); err == nil {
+		var sf struct {
+			Sources []string `json:"sources"`
+		}
+		if err := json.Unmarshal(sdata, &sf); err == nil && len(sf.Sources) > 0 {
+			m.Sources = sf.Sources
 		}
 	}
 	return &m, nil
@@ -403,7 +503,7 @@ func (p *Pack) prefetch(ctx context.Context, m *Manifest) {
 			return
 		default:
 		}
-		if p.Cached(f.ID) || p.Pending(f.ID) {
+		if p.fresh(f) || p.Pending(f.ID) {
 			continue
 		}
 		if err := p.download(ctx, f); err != nil {
@@ -416,11 +516,12 @@ func (p *Pack) prefetch(ctx context.Context, m *Manifest) {
 	log.Printf("[pack] 声音包预取完成（version %d，%d 个文件）", m.Version, len(m.Files))
 }
 
-// cachedCount counts how many of the manifest's files are on disk.
+// cachedCount counts how many of the manifest's files are cached with
+// their current bytes.
 func (p *Pack) cachedCount(m *Manifest) int {
 	n := 0
 	for _, f := range m.Files {
-		if p.Cached(f.ID) {
+		if p.fresh(f) {
 			n++
 		}
 	}
@@ -539,22 +640,36 @@ func (p *Pack) fetchArchiveFrom(ctx context.Context, url string, m *Manifest, on
 	return nil
 }
 
-// fetch GETs rel (relative to every source) and races them: the first
-// healthy answer wins, and cancelling the context it returns with stops
-// the stragglers. A response that is not a 200, or is an HTML page (a
-// mirror's error or risk-control answer), loses its heat.
-func (p *Pack) fetch(ctx context.Context, rel string) ([]byte, error) {
+// fetch GETs rel — relative to every source and to any raw base URLs the
+// repository handed down — racing them alongside direct URLs (a file's
+// attribution link): the first healthy answer wins, and cancelling the
+// context it returns with stops the stragglers. A response that is not a
+// 200, or is an HTML page (a mirror's error or risk-control answer),
+// loses its heat.
+func (p *Pack) fetch(ctx context.Context, rel string, direct []string) ([]byte, error) {
 	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
+
+	p.mu.Lock()
+	bases := append([]string{}, p.extraRaw...)
+	p.mu.Unlock()
+	urls := make([]string, 0, len(bases)+len(Sources)+len(direct))
+	for _, b := range bases {
+		urls = append(urls, strings.TrimRight(b, "/")+"/"+rel)
+	}
+	for _, src := range Sources {
+		urls = append(urls, strings.TrimRight(src.raw, "/")+"/"+rel)
+	}
+	urls = append(urls, direct...)
 
 	type result struct {
 		data []byte
 		err  error
 	}
-	ch := make(chan result, len(Sources))
-	for _, src := range Sources {
-		go func(raw string) {
-			req, err := http.NewRequestWithContext(cctx, http.MethodGet, strings.TrimRight(raw, "/")+"/"+rel, nil)
+	ch := make(chan result, len(urls))
+	for _, url := range urls {
+		go func(url string) {
+			req, err := http.NewRequestWithContext(cctx, http.MethodGet, url, nil)
 			if err != nil {
 				ch <- result{nil, err}
 				return
@@ -572,16 +687,16 @@ func (p *Pack) fetch(ctx context.Context, rel string) ([]byte, error) {
 			case err != nil:
 				ch <- result{nil, err}
 			case code != http.StatusOK:
-				ch <- result{nil, fmt.Errorf("%s: HTTP %d", raw, code)}
+				ch <- result{nil, fmt.Errorf("%s: HTTP %d", url, code)}
 			case strings.Contains(ct, "text/html"):
-				ch <- result{nil, fmt.Errorf("%s: HTML answer, not a file", raw)}
+				ch <- result{nil, fmt.Errorf("%s: HTML answer, not a file", url)}
 			default:
 				ch <- result{data, nil}
 			}
-		}(src.raw)
+		}(url)
 	}
 	var lastErr error = errors.New("pack: no source answered")
-	for range Sources {
+	for range urls {
 		if r := <-ch; r.err == nil {
 			// Returning cancels the context, closing the losing requests.
 			return r.data, nil
@@ -593,10 +708,21 @@ func (p *Pack) fetch(ctx context.Context, rel string) ([]byte, error) {
 }
 
 // download fetches one file, verifies its hash and moves it into place.
+// A direct URL from the file's attribution rides along in the race.
 func (p *Pack) download(ctx context.Context, f File) error {
 	cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	data, err := p.fetch(cctx, f.Path)
+	var direct []string
+	p.mu.Lock()
+	if p.man != nil && p.man.Attribution != nil {
+		if _, base, ok := strings.Cut(f.ID, "/"); ok {
+			if a := p.man.Attribution[base]; a.URL != "" {
+				direct = []string{a.URL}
+			}
+		}
+	}
+	p.mu.Unlock()
+	data, err := p.fetch(cctx, f.Path, direct)
 	if err != nil {
 		return err
 	}
@@ -604,13 +730,13 @@ func (p *Pack) download(ctx context.Context, f File) error {
 }
 
 // store verifies a file's bytes against the manifest and moves them into
-// place, atomically.
+// place, atomically, recording the hash in the state table.
 func (p *Pack) store(f File, data []byte) error {
 	if int64(len(data)) != f.Size {
 		return fmt.Errorf("%s: size %d, want %d", f.ID, len(data), f.Size)
 	}
 	sum := sha256.Sum256(data)
-	if hex.EncodeToString(sum[:]) != f.SHA56 {
+	if hex.EncodeToString(sum[:]) != f.SHA256 {
 		return fmt.Errorf("%s: sha256 mismatch", f.ID)
 	}
 	dst := filepath.Join(p.dir, filepath.FromSlash(f.Path))
@@ -622,15 +748,24 @@ func (p *Pack) store(f File, data []byte) error {
 		os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, dst)
+	if err := os.Rename(tmp, dst); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	p.state[f.ID] = f.SHA256
+	p.saveStateLocked()
+	p.mu.Unlock()
+	return nil
 }
 
 // prune removes cached files (and manifest entries' leftovers) the pack
 // no longer lists.
 func (p *Pack) prune(m *Manifest) {
 	keep := map[string]bool{}
+	keepID := map[string]bool{}
 	for _, f := range m.Files {
 		keep[f.Path] = true
+		keepID[f.ID] = true
 	}
 	root := p.soundsDir()
 	var paths []string
@@ -655,6 +790,19 @@ func (p *Pack) prune(m *Manifest) {
 			n++
 		}
 	}
+	// State entries follow their files out.
+	p.mu.Lock()
+	dirty := false
+	for id := range p.state {
+		if !keepID[id] {
+			delete(p.state, id)
+			dirty = true
+		}
+	}
+	if dirty {
+		p.saveStateLocked()
+	}
+	p.mu.Unlock()
 	if n > 0 {
 		log.Printf("[pack] 清理 %d 个已下架的缓存文件", n)
 	}

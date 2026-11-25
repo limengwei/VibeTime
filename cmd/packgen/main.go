@@ -28,14 +28,14 @@ import (
 
 // manifestFile is the pack's index, fetched by the app at startup.
 type manifestFile struct {
-	ID    string `json:"id"`    // "category/file-base", the app's sound ID
-	Path  string `json:"path"`  // path inside the repo, "sounds/..."
-	Size  int64  `json:"size"`  // bytes
-	SHA56 string `json:"sha256"`
+	ID     string `json:"id"`   // "category/file-base", the app's sound ID
+	Path   string `json:"path"` // path inside the repo, "sounds/..."
+	Size   int64  `json:"size"` // bytes
+	SHA256 string `json:"sha256"`
 }
 
 type manifest struct {
-	Version int           `json:"version"` // bumped when contents change
+	Version int            `json:"version"` // bumped when contents change
 	Files   []manifestFile `json:"files"`
 }
 
@@ -72,7 +72,7 @@ func main() {
 		if err != nil {
 			return err
 		}
-		files = append(files, manifestFile{ID: base, Path: "sounds/" + rel, Size: size, SHA56: sum})
+		files = append(files, manifestFile{ID: base, Path: "sounds/" + rel, Size: size, SHA256: sum})
 		return nil
 	})
 	if err != nil {
@@ -96,7 +96,7 @@ func main() {
 		keep[strings.TrimPrefix(f.Path, "sounds/")] = true
 		total += f.Size
 		dst := filepath.Join(*repo, filepath.FromSlash(f.Path))
-		if err := copyIfChanged(filepath.Join(*src, filepath.FromSlash(strings.TrimPrefix(f.Path, "sounds/"))), dst, f.SHA56); err != nil {
+		if err := copyIfChanged(filepath.Join(*src, filepath.FromSlash(strings.TrimPrefix(f.Path, "sounds/"))), dst, f.SHA256); err != nil {
 			fatal(err)
 		}
 	}
@@ -128,9 +128,12 @@ func main() {
 }
 
 // labelsFile is the hand-editable name mapping the app reads at runtime.
+// Attribution (per base name: origin, license and an optional direct URL)
+// is hand-maintained too; decoding and re-encoding keeps it in step.
 type labelsFile struct {
-	Categories map[string]catalog.CategoryMeta `json:"categories"`
-	Labels     map[string]string               `json:"labels"`
+	Categories  map[string]catalog.CategoryMeta `json:"categories"`
+	Labels      map[string]string               `json:"labels"`
+	Attribution map[string]catalog.Attribution  `json:"attribution,omitempty"`
 }
 
 // writeLabels keeps <repo>/labels.json in step with the files: existing
@@ -179,6 +182,11 @@ func writeLabels(repo string, files []manifestFile) int {
 	for base := range lf.Labels {
 		if !bases[base] {
 			delete(lf.Labels, base)
+		}
+	}
+	for base := range lf.Attribution {
+		if !bases[base] {
+			delete(lf.Attribution, base)
 		}
 	}
 	out, err := json.MarshalIndent(lf, "", "  ")

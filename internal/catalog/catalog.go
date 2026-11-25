@@ -30,6 +30,16 @@ type Category struct {
 	Sounds []Sound
 }
 
+// Attribution records where a sound's bytes came from. The sound pack's
+// labels.json carries it per base name — origin and license for a future
+// credits view, and an optional direct URL the client races as one more
+// download candidate. All fields may be empty.
+type Attribution struct {
+	Origin  string `json:"origin,omitempty"`
+	License string `json:"license,omitempty"`
+	URL     string `json:"url,omitempty"`
+}
+
 // Catalog is the loaded sound library.
 type Catalog struct {
 	Cats  []Category
@@ -282,6 +292,27 @@ func (c *Catalog) AddSound(s Sound) {
 		Sounds: []Sound{s},
 	})
 	sort.Slice(c.Cats, func(a, b int) bool { return c.Cats[a].Title < c.Cats[b].Title })
+}
+
+// SyncAll replaces the catalog's sounds wholesale — the downloaded pack's
+// manifest is the whole library, so sounds that left the repository drop
+// out here and renamed labels land. It returns the IDs that were removed.
+func (c *Catalog) SyncAll(sounds []Sound) (removed []string) {
+	present := make(map[string]bool, len(sounds))
+	for _, s := range sounds {
+		present[s.ID] = true
+	}
+	for id := range c.byID {
+		if !present[id] {
+			removed = append(removed, id)
+		}
+	}
+	c.byID = map[string]Sound{}
+	c.Cats = nil
+	for _, s := range sounds {
+		c.AddSound(s)
+	}
+	return removed
 }
 
 // SetCategoryMeta renames a category (and its emoji), re-sorting the list;

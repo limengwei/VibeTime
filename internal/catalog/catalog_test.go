@@ -112,6 +112,47 @@ func TestAddSoundMergesAndSorts(t *testing.T) {
 	}
 }
 
+func TestSyncAll(t *testing.T) {
+	c := Empty()
+	c.AddSound(Sound{ID: "nature/river", Label: "河流", Category: "nature"})
+	c.AddSound(Sound{ID: "nature/campfire", Label: "篝火", Category: "nature"})
+
+	removed := c.SyncAll([]Sound{
+		{ID: "nature/river", Label: "河", Category: "nature"},    // renamed
+		{ID: "urban/fireworks", Label: "烟花", Category: "urban"}, // added
+	})
+	if len(removed) != 1 || removed[0] != "nature/campfire" {
+		t.Fatalf("removed = %v, want [nature/campfire]", removed)
+	}
+	if s, ok := c.Sound("nature/river"); !ok || s.Label != "河" {
+		t.Fatalf("rename did not land: %+v", s)
+	}
+	if _, ok := c.Sound("nature/campfire"); ok {
+		t.Fatal("removed sound still in catalog")
+	}
+	if s, ok := c.Sound("urban/fireworks"); !ok || s.Label != "烟花" {
+		t.Fatalf("added sound missing: %+v", s)
+	}
+	if c.Total() != 2 {
+		t.Fatalf("Total = %d, want 2", c.Total())
+	}
+	// Categories were rebuilt from the new list.
+	var n int
+	for _, cat := range c.Cats {
+		n += len(cat.Sounds)
+	}
+	if n != 2 {
+		t.Fatalf("sounds across categories = %d, want 2", n)
+	}
+	// Metadata still applies on top of a rebuild.
+	c.SetCategoryMeta("urban", "城市", "🏙️")
+	for _, cat := range c.Cats {
+		if cat.ID == "urban" && (cat.Title != "城市" || cat.Emoji != "🏙️") {
+			t.Errorf("SetCategoryMeta after SyncAll did not apply: %+v", cat)
+		}
+	}
+}
+
 func TestStoreRoundtrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "presets.json")
 	s, err := openStore(path)

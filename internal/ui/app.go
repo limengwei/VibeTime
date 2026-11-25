@@ -5,6 +5,7 @@ package ui
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -74,7 +75,7 @@ func Main(cx *core.Scope, deps Deps) core.Node {
 	// labels and category names from its labels.json — then the cache
 	// fills quietly. A cold start (nothing cached) holds the prefetch for
 	// the welcome dialog instead, so the user consents to the download.
-	coldStart := deps.Pack != nil && deps.Pack.CachedCount() == 0
+	coldStart := deps.Pack != nil && deps.Pack.ReadyCount() == 0
 	a.startPack(!coldStart)
 	if coldStart {
 		a.welcomeOpen.Set(true)
@@ -129,26 +130,28 @@ var appBackground = core.Style{
 	},
 }
 
-// startPack fetches the manifest and merges it into the catalog, prefetching
-// after (unless the welcome dialog owns the first fill). It is re-runnable:
-// the welcome dialog's retry calls it again after a failure.
+// startPack fetches the manifest and syncs the catalog to it — added,
+// renamed and removed sounds all land — prefetching after (unless the
+// welcome dialog owns the first fill). It is re-runnable: the welcome
+// dialog's retry calls it again after a failure.
 func (a *app) startPack(prefetch bool) {
 	if a.deps.Pack == nil {
 		return
 	}
 	a.deps.Pack.Start(func(m *pack.Manifest) {
+		sounds := make([]catalog.Sound, 0, len(m.Files))
 		for _, f := range m.Files {
-			if _, ok := a.deps.Catalog.Sound(f.ID); !ok {
-				s := catalog.SoundFromID(f.ID)
-				if _, base, _ := strings.Cut(f.ID, "/"); m.Labels[base] != "" {
-					s.Label = m.Labels[base]
-				}
-				a.deps.Catalog.AddSound(s)
+			s := catalog.SoundFromID(f.ID)
+			if _, base, _ := strings.Cut(f.ID, "/"); m.Labels[base] != "" {
+				s.Label = m.Labels[base]
 			}
+			sounds = append(sounds, s)
 		}
+		removed := a.deps.Catalog.SyncAll(sounds)
 		for id, cm := range m.Categories {
 			a.deps.Catalog.SetCategoryMeta(id, cm.Title, cm.Emoji)
 		}
+		a.dropSounds(removed)
 		a.packReady.Set(true)
 		a.packFailed.Set(false)
 		a.bumpRefresh()
@@ -156,6 +159,20 @@ func (a *app) startPack(prefetch bool) {
 		a.packFailed.Set(true)
 		a.bumpRefresh()
 	})
+}
+
+// dropSounds retires sounds the pack no longer ships: stop their tracks
+// and clear them from the applied scene.
+func (a *app) dropSounds(ids []string) {
+	for _, id := range ids {
+		if a.deps.Engine.Playing(id) {
+			a.deps.Engine.Stop(id)
+		}
+		delete(a.activeVolumes, id)
+		if i := slices.Index(a.activeOrder, id); i >= 0 {
+			a.activeOrder = slices.Delete(a.activeOrder, i, i+1)
+		}
+	}
 }
 
 // header is the title block.
