@@ -10,6 +10,10 @@
   <a href="https://github.com/limengwei/VibeTime/releases/latest">
     <img src="https://img.shields.io/github/v/release/limengwei/VibeTime?label=%E4%B8%8B%E8%BD%BD&style=for-the-badge&color=blue" alt="下载最新版本" />
   </a>
+  &nbsp;
+  <a href="https://awesomensgo.dev/apps/vibe-time">
+    <img src="https://awesomensgo.dev/badge.svg" alt="Listed on Awesome NSGo" />
+  </a>
 </p>
 
 ## 截图
